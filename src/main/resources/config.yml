@@ -1,0 +1,21 @@
+spawn:
+  world: world
+  x: 0.5
+  y: 80.0
+  z: 0.5
+  yaw: 0.0
+  pitch: 0.0
+  protection-radius: 30.0
+  command-radius: 300.0
+messages:
+  protected: '&cHey, hier können keine Blöcke zerstört werden!'
+  too-far: '&cDu bist zu weit vom Spawn entfernt, um /spawn zu benutzen.'
+  no-player: '&cSpieler nicht gefunden.'
+  stats-header: '&6SigmaCraft-Statistiken: &e%player%'
+
+elytra:
+  enabled: true
+  eligible-radius: 80.0
+  min-y: 55.0
+  boost-strength: 1.8
+  duration-seconds: 12
