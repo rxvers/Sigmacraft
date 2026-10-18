@@ -1,6 +1,7 @@
 package de.sigmacraft.core;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -10,25 +11,46 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.PluginCommand;
+import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Mob;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
-public final class SigmaCraftCore extends JavaPlugin implements Listener {
+public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCompleter {
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
+    private static final LegacyComponentSerializer SECTION = LegacyComponentSerializer.legacySection();
+    private static final MiniMessage MM = MiniMessage.miniMessage();
+    private static final List<String> METRICS = List.of("kills", "deaths", "blocks", "diamonds", "playtime");
+    private final Map<UUID, BukkitTask> pendingTeleports = new HashMap<>();
+    private final Map<UUID, Long> lastTabUpdate = new HashMap<>();
+    private Map<String, UUID> topHolders = new HashMap<>();
     private File statsFile;
     private YamlConfiguration stats;
     private BukkitTask playtimeTask;
@@ -40,21 +62,25 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         loadStats();
+        recomputeTop();
         teams = new TeamManager(this);
         leaderboards = new TopLeaderboard(this);
         elytraBoost = new ElytraBoost(this);
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getPluginManager().registerEvents(elytraBoost, this);
-        getCommand("spawn").setExecutor(this);
-        getCommand("scstats").setExecutor(this);
-        getCommand("sigmacraft").setExecutor(this);
-        getCommand("team").setExecutor(this);
-        getCommand("sctop").setExecutor(this);
+        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard")) {
+            PluginCommand cmd = getCommand(name);
+            if (cmd == null) continue;
+            cmd.setExecutor(this);
+            cmd.setTabCompleter(this);
+        }
         teams.loadOnlinePlayers();
         leaderboards.start();
         for (Player player : Bukkit.getOnlinePlayers()) {
             updateTab(player);
         }
+        // Top-1-Symbole alle 10 Sekunden neu berechnen; Tablist nur bei Änderung aktualisieren.
+        Bukkit.getScheduler().runTaskTimer(this, () -> { if (recomputeTop()) refreshAllTabs(); }, 200L, 200L);
         playtimeTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             for (Player player : Bukkit.getOnlinePlayers()) {
                 add(player.getUniqueId(), "playtime_seconds", 60);
@@ -62,7 +88,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
             }
             saveStats();
         }, 1200L, 1200L);
-        getLogger().info("SigmaCraftCore 0.3.0 gestartet; Statistiken werden in plugins/SigmaCraftCore/stats.yml gespeichert.");
+        getLogger().info("SigmaCraftCore gestartet; Statistiken werden in plugins/SigmaCraftCore/stats.yml gespeichert.");
     }
 
     @Override
@@ -98,14 +124,44 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         setName(event.getPlayer().getUniqueId(), event.getPlayer().getName());
-        updateTab(event.getPlayer());
         if (teams != null) teams.apply(event.getPlayer());
+        refreshAllTabs();
         saveStats();
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        cancelTeleport(id, null);
+        lastTabUpdate.remove(id);
         saveStats();
+        Bukkit.getScheduler().runTask(this, this::refreshAllTabs);
+    }
+
+    @EventHandler
+    public void onMove(PlayerMoveEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        if (!pendingTeleports.containsKey(id) || event.getTo() == null) return;
+        Location from = event.getFrom(), to = event.getTo();
+        if (from.getBlockX() != to.getBlockX() || from.getBlockY() != to.getBlockY() || from.getBlockZ() != to.getBlockZ()) {
+            cancelTeleport(id, "&cTeleport abgebrochen: Du hast dich bewegt.");
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onAnyDamage(EntityDamageEvent event) {
+        if (event.getEntity() instanceof Player p && event.getFinalDamage() > 0 && pendingTeleports.containsKey(p.getUniqueId())) {
+            cancelTeleport(p.getUniqueId(), "&cTeleport abgebrochen: Du hast Schaden genommen.");
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onCreatureSpawn(CreatureSpawnEvent event) {
+        if (!getConfig().getBoolean("spawn.block-mobs", true) || !(event.getEntity() instanceof Mob)) return;
+        CreatureSpawnEvent.SpawnReason reason = event.getSpawnReason();
+        if (reason == CreatureSpawnEvent.SpawnReason.COMMAND || reason == CreatureSpawnEvent.SpawnReason.CUSTOM
+                || reason == CreatureSpawnEvent.SpawnReason.SPAWNER_EGG) return;
+        if (insideProtection(event.getLocation())) event.setCancelled(true);
     }
 
     @EventHandler
@@ -134,14 +190,36 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
         add(player.getUniqueId(), "blocks_mined", 1);
         if (isDiamondOre(event.getBlock())) add(player.getUniqueId(), "diamonds_mined", 1);
         setName(player.getUniqueId(), player.getName());
-        updateTab(player);
+        updateTabThrottled(player);
         // Persist in batches rather than writing the YAML file for every block.
+    }
+
+    private boolean denyInSpawn(Player player, Location location) {
+        if (!insideProtection(location) || player.hasPermission("sigmacraft.admin")) return false;
+        player.sendMessage(color(getConfig().getString("messages.protected-place", "&cHey, hier können keine Blöcke platziert werden!")));
+        return true;
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBlockPlace(BlockPlaceEvent event) {
+        if (denyInSpawn(event.getPlayer(), event.getBlock().getLocation())) event.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBucketEmpty(PlayerBucketEmptyEvent event) {
+        if (denyInSpawn(event.getPlayer(), event.getBlock().getLocation())) event.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBucketFill(PlayerBucketFillEvent event) {
+        if (denyInSpawn(event.getPlayer(), event.getBlock().getLocation())) event.setCancelled(true);
     }
 
     @EventHandler
     public void onChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
-        String icon = chatIcon(player.getUniqueId());
+        String badges = topBadges(player.getUniqueId());
+        String icon = badges.isEmpty() ? chatIcon(player.getUniqueId()) : badges;
         // Keep the vanilla chat format and add only small symbols, no rank titles.
         String prefix = teams == null ? "" : teams.prefix(player.getUniqueId());
         event.setFormat(prefix + "%s " + icon + ChatColor.RESET + ": %s");
@@ -151,22 +229,23 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (command.getName().equalsIgnoreCase("team")) {
             if (!(sender instanceof Player p)) { sender.sendMessage("Nur ingame verfügbar."); return true; }
-            if (args.length == 0) { p.sendMessage("§b/team create <Tag> <Farbe> §7| /team invite <Spieler> §7| /team accept §7| /team leave §7| /team info"); return true; }
+            final String pre = "§8[§bTeam§8] ";
+            if (args.length == 0) { teamHelp(p); return true; }
             switch (args[0].toLowerCase(Locale.ROOT)) {
                 case "create" -> {
-                    if (args.length != 3) { p.sendMessage("§c/team create <Tag> <Farbe>"); return true; }
-                    if (teams.create(p, args[1], args[2])) p.sendMessage("§aTeam [" + args[1] + "] erstellt.");
-                    else p.sendMessage("§cTeam konnte nicht erstellt werden. Tag 2-12 Zeichen, Farbe red/blue/green/yellow/aqua/purple/white/gold/gray/black; du darfst noch kein Team haben.");
+                    if (args.length != 3) { p.sendMessage(pre + "§c/team create <Tag> <Farbe>"); return true; }
+                    if (teams.create(p, args[1], args[2])) p.sendMessage(pre + "§aTeam §f[" + args[1] + "] §aerstellt.");
+                    else p.sendMessage(pre + "§cTeam konnte nicht erstellt werden. §7Tag: 2-12 Buchstaben/Zahlen, Farbe: " + String.join(", ", teams.colorNames()) + ". Du darfst noch kein Team haben.");
                 }
                 case "invite" -> {
-                    if (args.length != 2) { p.sendMessage("§c/team invite <Spieler>"); return true; }
+                    if (args.length != 2) { p.sendMessage(pre + "§c/team invite <Spieler>"); return true; }
                     Player target = Bukkit.getPlayerExact(args[1]);
-                    if (target == null || !teams.invite(p, target)) p.sendMessage("§cEinladung nicht möglich. Bist du Teamleiter und hat der Spieler noch kein Team?");
+                    if (target == null || !teams.invite(p, target)) p.sendMessage(pre + "§cEinladung nicht möglich. §7Bist du Teamleiter und hat der Spieler noch kein Team?");
                 }
-                case "accept" -> { if (teams.accept(p)) p.sendMessage("§aDu bist dem Team beigetreten."); else p.sendMessage("§cKeine gültige Einladung vorhanden oder du hast bereits ein Team."); }
-                case "leave" -> { if (teams.leave(p)) p.sendMessage("§eDu hast das Team verlassen."); else p.sendMessage("§cDu bist in keinem Team."); }
-                case "info" -> { String team = teams.teamOf(p.getUniqueId()); if (team.isEmpty()) p.sendMessage("§7Du bist in keinem Team."); else p.sendMessage(teams.color(team) + "Team [" + teams.tag(team) + "] §7- online: " + teams.onlineCount(team)); }
-                default -> p.sendMessage("§b/team create <Tag> <Farbe> §7| /team invite <Spieler> §7| /team accept §7| /team leave §7| /team info");
+                case "accept" -> p.sendMessage(pre + (teams.accept(p) ? "§aDu bist dem Team beigetreten." : "§cKeine gültige Einladung vorhanden oder du hast bereits ein Team."));
+                case "leave" -> p.sendMessage(pre + (teams.leave(p) ? "§eDu hast das Team verlassen." : "§cDu bist in keinem Team."));
+                case "info" -> teams.sendInfo(p);
+                default -> teamHelp(p);
             }
             return true;
         }
@@ -200,72 +279,20 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
                 player.sendMessage(color(getConfig().getString("messages.too-far")));
                 return true;
             }
-            player.teleport(spawn);
-            player.sendMessage(ChatColor.GREEN + "Du wurdest zum Spawn teleportiert.");
+            if (player.hasPermission("sigmacraft.admin")) {
+                player.teleport(spawn);
+                player.sendMessage(ChatColor.GREEN + "Du wurdest zum Spawn teleportiert.");
+            } else {
+                startTeleport(player);
+            }
             return true;
         }
+        if (command.getName().equalsIgnoreCase("stat")) return handleStat(sender, args);
+        if (command.getName().equalsIgnoreCase("leaderboard")) return handleLeaderboard(sender, args);
         if (command.getName().equalsIgnoreCase("sigmacraft")) {
-            if (!sender.hasPermission("sigmacraft.stats") && !sender.isOp()) {
-                sender.sendMessage("Keine Berechtigung.");
-                return true;
-            }
-            if (args.length == 3 && args[0].equalsIgnoreCase("stat")) {
-                OfflinePlayer target = Bukkit.getOfflinePlayer(args[2]);
-                UUID id = target.getUniqueId();
-                String name = stats.getString(base(id) + ".name", target.getName() == null ? args[2] : target.getName());
-                String metric = args[1].toLowerCase(Locale.ROOT);
-                long value;
-                switch (metric) {
-                    case "kills" -> value = get(id, "kills");
-                    case "deaths" -> value = get(id, "deaths");
-                    case "blocks" -> value = get(id, "blocks_mined");
-                    case "diamonds" -> value = get(id, "diamonds_mined");
-                    case "playtime" -> value = get(id, "playtime_seconds");
-                    case "stats" -> {
-                        sender.sendMessage("SigmaCraft-Statistiken für " + name + ": Kills " + get(id, "kills")
-                                + " | Tode " + get(id, "deaths") + " | Blöcke " + get(id, "blocks_mined")
-                                + " | Diamanterze " + get(id, "diamonds_mined") + " | Spielzeit " + formatTime(get(id, "playtime_seconds")));
-                        return true;
-                    }
-                    default -> { sender.sendMessage("Unbekannte Statistik."); return true; }
-                }
-                String statLabel = switch (metric) {
-                    case "kills" -> "Kills";
-                    case "deaths" -> "Tode";
-                    case "blocks" -> "abgebaute Blöcke";
-                    case "diamonds" -> "abgebaute Diamanterze";
-                    default -> "Spielzeit";
-                };
-                sender.sendMessage(name + " – " + statLabel + ": " + (metric.equals("playtime") ? formatTime(value) : value));
-                return true;
-            }
-            if (args.length == 2 && args[0].equalsIgnoreCase("leaderboard")) {
-                String metric = args[1].toLowerCase(Locale.ROOT);
-                String key = switch (metric) {
-                    case "kills" -> "kills";
-                    case "deaths" -> "deaths";
-                    case "blocks" -> "blocks_mined";
-                    case "diamonds" -> "diamonds_mined";
-                    case "playtime" -> "playtime_seconds";
-                    default -> null;
-                };
-                if (key == null) { sender.sendMessage("Unbekannte Rangliste."); return true; }
-                java.util.List<java.util.Map.Entry<String, Long>> ranking = new java.util.ArrayList<>();
-                for (String rawId : stats.getConfigurationSection("players") == null ? java.util.Set.<String>of() : stats.getConfigurationSection("players").getKeys(false)) {
-                    String path = "players." + rawId;
-                    ranking.add(new java.util.AbstractMap.SimpleEntry<>(stats.getString(path + ".name", rawId), stats.getLong(path + "." + key, 0L)));
-                }
-                ranking.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
-                StringBuilder out = new StringBuilder("Top 10 – ").append(metric).append(":\n");
-                for (int i = 0; i < Math.min(10, ranking.size()); i++) {
-                    var row = ranking.get(i);
-                    out.append(i + 1).append(". ").append(row.getKey()).append(" — ")
-                            .append(metric.equals("playtime") ? formatTime(row.getValue()) : row.getValue()).append('\n');
-                }
-                sender.sendMessage(out.toString().trim());
-                return true;
-            }
-            sender.sendMessage("Usage: /sigmacraft stat <kills|deaths|blocks|diamonds|playtime|stats> <Spieler> oder /sigmacraft leaderboard <kategorie>");
+            if (args.length >= 1 && args[0].equalsIgnoreCase("stat")) return handleStat(sender, Arrays.copyOfRange(args, 1, args.length));
+            if (args.length >= 1 && args[0].equalsIgnoreCase("leaderboard")) return handleLeaderboard(sender, Arrays.copyOfRange(args, 1, args.length));
+            sender.sendMessage(sender instanceof Player ? "§7Nutze §b/stat §7und §b/leaderboard" : "Usage: /sigmacraft stat <kills|deaths|blocks|diamonds|playtime|stats> <Spieler> oder /sigmacraft leaderboard <kategorie>");
             return true;
         }
         if (command.getName().equalsIgnoreCase("scstats")) {
@@ -336,15 +363,292 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
 
     public void refreshPlayerTab(Player player) { updateTab(player); }
 
+    private void refreshAllTabs() {
+        for (Player online : Bukkit.getOnlinePlayers()) updateTab(online);
+    }
+
+    private void updateTabThrottled(Player player) {
+        long now = System.currentTimeMillis();
+        if (now - lastTabUpdate.getOrDefault(player.getUniqueId(), 0L) < 2000L) return;
+        updateTab(player);
+    }
+
+    /** Tablist: Name als "[Team] Spieler", Header mit Servername, Footer mit eigenen Werten. */
     private void updateTab(Player player) {
-        String icon = chatIcon(player.getUniqueId());
-        String teamPrefix = teams == null ? "" : teams.prefix(player.getUniqueId());
-        String teamOnline = teams == null ? "" : teams.onlineTeamSummary(player.getUniqueId());
-        String ownStats = ChatColor.DARK_GRAY + " ☠" + get(player.getUniqueId(), "deaths")
-                + " ⛏" + get(player.getUniqueId(), "blocks_mined");
-        Component name = LEGACY.deserialize(icon + " " + teamPrefix + ChatColor.RESET + player.getName() + ownStats + teamOnline);
-        player.playerListName(name);
-        player.sendPlayerListHeaderAndFooter(Component.empty(), LEGACY.deserialize("&7sigmacraft.minecraftserver.de"));
+        UUID id = player.getUniqueId();
+        lastTabUpdate.put(id, System.currentTimeMillis());
+        String prefix = teams == null ? "" : teams.prefix(id);
+        String badges = topBadges(id);
+        player.playerListName(SECTION.deserialize(prefix + ChatColor.WHITE + player.getName() + (badges.isEmpty() ? "" : " " + badges)));
+
+        String team = teams == null ? "" : teams.teamOf(id);
+        String teamText = team.isEmpty() ? "-" : Integer.toString(teams.onlineCount(team));
+        Component header = MM.deserialize("<newline><gradient:#55ffff:#5555ff><bold>SIGMACRAFT</bold></gradient><newline>"
+                + "<gray>sigmacraft.minecraftserver.de</gray><newline>"
+                + "<dark_gray>Online</dark_gray> <white>" + Bukkit.getOnlinePlayers().size() + "</white><newline>");
+        Component footer = MM.deserialize("<newline>"
+                + "<red>Tode</red> <white>" + get(id, "deaths") + "</white> <dark_gray>|</dark_gray> "
+                + "<green>Kills</green> <white>" + get(id, "kills") + "</white> <dark_gray>|</dark_gray> "
+                + "<aqua>Team-Online</aqua> <white>" + teamText + "</white> <dark_gray>|</dark_gray> "
+                + "<gold>Abgebaut</gold> <white>" + get(id, "blocks_mined") + "</white><newline>");
+        player.sendPlayerListHeaderAndFooter(header, footer);
+    }
+
+    /** Ermittelt pro Rangliste den Spieler auf Platz 1 (nur bei Wert > 0). Gibt true zurück, wenn sich etwas geändert hat. */
+    private boolean recomputeTop() {
+        Map<String, UUID> next = new HashMap<>();
+        ConfigurationSection section = stats.getConfigurationSection("players");
+        if (section != null) {
+            for (String metric : METRICS) {
+                String key = statKey(metric);
+                long best = 0L;
+                UUID holder = null;
+                for (String raw : section.getKeys(false)) {
+                    long value = stats.getLong("players." + raw + "." + key, 0L);
+                    if (value <= best) continue;
+                    try { holder = UUID.fromString(raw); best = value; } catch (IllegalArgumentException ignored) { }
+                }
+                if (holder != null) next.put(metric, holder);
+            }
+        }
+        boolean changed = !next.equals(topHolders);
+        topHolders = next;
+        return changed;
+    }
+
+    /** Kleine Symbole für Spieler, die in einer Rangliste auf Platz 1 stehen. */
+    private String topBadges(UUID id) {
+        StringBuilder sb = new StringBuilder();
+        if (id.equals(topHolders.get("kills"))) sb.append(ChatColor.RED).append(ChatColor.BOLD).append("⚔");
+        if (id.equals(topHolders.get("deaths"))) sb.append(ChatColor.DARK_RED).append(ChatColor.BOLD).append("☠");
+        if (id.equals(topHolders.get("diamonds"))) sb.append(ChatColor.AQUA).append(ChatColor.BOLD).append("◆");
+        if (id.equals(topHolders.get("blocks"))) sb.append(ChatColor.GRAY).append(ChatColor.BOLD).append("⛏");
+        if (id.equals(topHolders.get("playtime"))) sb.append(ChatColor.GOLD).append(ChatColor.BOLD).append("◷");
+        return sb.length() == 0 ? "" : sb.append(ChatColor.RESET).toString();
+    }
+
+    public String nameOf(UUID id) {
+        String name = stats.getString(base(id) + ".name");
+        if (name != null) return name;
+        OfflinePlayer off = Bukkit.getOfflinePlayer(id);
+        return off.getName() == null ? id.toString().substring(0, 8) : off.getName();
+    }
+
+    private void teamHelp(Player p) {
+        p.sendMessage("§8▬▬▬▬ §b§lTEAM §8▬▬▬▬");
+        p.sendMessage("§b/team create §7<Tag> <Farbe>");
+        p.sendMessage("§b/team invite §7<Spieler>");
+        p.sendMessage("§b/team accept §8| §b/team leave");
+        p.sendMessage("§b/team info §7- Leiter und Mitglieder");
+    }
+
+    // ---------- /spawn mit Wartezeit ----------
+
+    private void startTeleport(Player player) {
+        UUID id = player.getUniqueId();
+        if (pendingTeleports.containsKey(id)) {
+            player.sendMessage(color("&eDein Teleport läuft bereits."));
+            return;
+        }
+        int delay = Math.max(1, getConfig().getInt("spawn.teleport-delay-seconds", 5));
+        player.sendMessage(color("&8[&bSpawn&8] &7Teleport in &f" + delay + " &7Sekunden. &eNicht bewegen und keinen Schaden nehmen!"));
+        int[] left = {delay};
+        BukkitTask task = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (!player.isOnline()) { cancelTeleport(id, null); return; }
+            if (left[0] <= 0) {
+                cancelTeleport(id, null);
+                Location spawn = configuredSpawn();
+                if (spawn != null) {
+                    player.teleport(spawn);
+                    player.sendMessage(color("&8[&bSpawn&8] &aDu wurdest zum Spawn teleportiert."));
+                }
+                return;
+            }
+            player.sendActionBar(LEGACY.deserialize("&bTeleport in &f" + left[0] + "&bs"));
+            left[0]--;
+        }, 0L, 20L);
+        pendingTeleports.put(id, task);
+    }
+
+    private void cancelTeleport(UUID id, String reason) {
+        BukkitTask task = pendingTeleports.remove(id);
+        if (task == null) return;
+        task.cancel();
+        Player p = Bukkit.getPlayer(id);
+        if (reason != null && p != null) {
+            p.sendMessage(color(reason));
+            p.sendActionBar(LEGACY.deserialize(reason));
+        }
+    }
+
+    // ---------- Stats-Befehle (/stat, /leaderboard, /sigmacraft ...) ----------
+
+    private String statKey(String metric) {
+        return switch (metric) {
+            case "kills" -> "kills";
+            case "deaths" -> "deaths";
+            case "blocks" -> "blocks_mined";
+            case "diamonds" -> "diamonds_mined";
+            default -> "playtime_seconds";
+        };
+    }
+
+    private String prettyLabel(String metric) {
+        return switch (metric) {
+            case "kills" -> "&a⚔ Kills";
+            case "deaths" -> "&c☠ Tode";
+            case "blocks" -> "&7⛏ Abgebaute Blöcke";
+            case "diamonds" -> "&b◆ Diamanterze";
+            default -> "&6◷ Spielzeit";
+        };
+    }
+
+    private String consoleLabel(String metric) {
+        return switch (metric) {
+            case "kills" -> "Kills";
+            case "deaths" -> "Tode";
+            case "blocks" -> "abgebaute Blöcke";
+            case "diamonds" -> "abgebaute Diamanterze";
+            default -> "Spielzeit";
+        };
+    }
+
+    private String valueText(String metric, long value) {
+        return metric.equals("playtime") ? formatTime(value) : Long.toString(value);
+    }
+
+    private UUID resolveId(String name, boolean allowOfflineLookup) {
+        Player online = Bukkit.getPlayerExact(name);
+        if (online != null) return online.getUniqueId();
+        ConfigurationSection section = stats.getConfigurationSection("players");
+        if (section != null) {
+            for (String raw : section.getKeys(false)) {
+                if (!name.equalsIgnoreCase(stats.getString("players." + raw + ".name", ""))) continue;
+                try { return UUID.fromString(raw); } catch (IllegalArgumentException ignored) { }
+            }
+        }
+        return allowOfflineLookup ? Bukkit.getOfflinePlayer(name).getUniqueId() : null;
+    }
+
+    private void send(CommandSender sender, String ampersandText) { sender.sendMessage(LEGACY.deserialize(ampersandText)); }
+
+    private boolean handleStat(CommandSender sender, String[] args) {
+        boolean pretty = sender instanceof Player;
+        String metric = args.length >= 1 ? args[0].toLowerCase(Locale.ROOT) : "all";
+        if (metric.equals("stats")) metric = "all";
+        if (!metric.equals("all") && !METRICS.contains(metric)) {
+            if (pretty) send(sender, "&cUnbekannte Statistik. &7Nutze: &fkills&7, &fdeaths&7, &fblocks&7, &fdiamonds&7, &fplaytime&7, &fall");
+            else sender.sendMessage("Unbekannte Statistik.");
+            return true;
+        }
+        UUID id;
+        String name;
+        if (args.length >= 2) {
+            id = resolveId(args[1], !pretty);
+            if (id == null) {
+                if (pretty) send(sender, getConfig().getString("messages.no-player", "&cSpieler nicht gefunden."));
+                else sender.sendMessage("Spieler nicht gefunden.");
+                return true;
+            }
+            name = stats.getString(base(id) + ".name", args[1]);
+        } else if (sender instanceof Player p) {
+            id = p.getUniqueId();
+            name = p.getName();
+        } else {
+            sender.sendMessage("Usage: stat <kills|deaths|blocks|diamonds|playtime|all> <Spieler>");
+            return true;
+        }
+
+        if (!pretty) {
+            if (metric.equals("all")) {
+                sender.sendMessage("SigmaCraft-Statistiken für " + name + ": Kills " + get(id, "kills")
+                        + " | Tode " + get(id, "deaths") + " | Blöcke " + get(id, "blocks_mined")
+                        + " | Diamanterze " + get(id, "diamonds_mined") + " | Spielzeit " + formatTime(get(id, "playtime_seconds")));
+            } else {
+                sender.sendMessage(name + " – " + consoleLabel(metric) + ": " + valueText(metric, get(id, statKey(metric))));
+            }
+            return true;
+        }
+
+        send(sender, "&8▬▬▬ &b&lSIGMACRAFT &8▬▬▬");
+        if (metric.equals("all")) {
+            send(sender, "&7Statistiken von &f" + name);
+            send(sender, "&c☠ Tode &f" + get(id, "deaths") + "  &8|  &a⚔ Kills &f" + get(id, "kills"));
+            send(sender, "&7⛏ Blöcke &f" + get(id, "blocks_mined") + "  &8|  &b◆ Diamanten &f" + get(id, "diamonds_mined"));
+            send(sender, "&6◷ Spielzeit &f" + formatTime(get(id, "playtime_seconds")));
+        } else {
+            send(sender, "&7" + name + "  &8» " + prettyLabel(metric) + " &f" + valueText(metric, get(id, statKey(metric))));
+        }
+        return true;
+    }
+
+    private boolean handleLeaderboard(CommandSender sender, String[] args) {
+        boolean pretty = sender instanceof Player;
+        String metric = args.length >= 1 ? args[0].toLowerCase(Locale.ROOT) : "";
+        if (!METRICS.contains(metric)) {
+            if (pretty) send(sender, "&7Nutze: &b/leaderboard &f<kills|deaths|blocks|diamonds|playtime>");
+            else sender.sendMessage("Unbekannte Rangliste.");
+            return true;
+        }
+        List<RankRow> rows = top(metric, 10);
+        if (!pretty) {
+            StringBuilder out = new StringBuilder("Top 10 – ").append(metric).append(":\n");
+            for (int i = 0; i < rows.size(); i++) {
+                out.append(i + 1).append(". ").append(rows.get(i).name()).append(" — ").append(valueText(metric, rows.get(i).value())).append('\n');
+            }
+            sender.sendMessage(out.toString().trim());
+            return true;
+        }
+        send(sender, "&8▬▬▬ &b&lTOP 10 &8» " + prettyLabel(metric) + " &8▬▬▬");
+        if (rows.isEmpty()) send(sender, "&7Noch keine Einträge.");
+        for (int i = 0; i < rows.size(); i++) {
+            String rank = i == 0 ? "&6&l1." : i == 1 ? "&f&l2." : i == 2 ? "&c&l3." : "&7" + (i + 1) + ".";
+            send(sender, rank + " &f" + rows.get(i).name() + " &8» &b" + valueText(metric, rows.get(i).value()));
+        }
+        return true;
+    }
+
+    // ---------- Tab-Completion ----------
+
+    private List<String> onlineNames() {
+        List<String> names = new ArrayList<>();
+        for (Player p : Bukkit.getOnlinePlayers()) names.add(p.getName());
+        return names;
+    }
+
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        List<String> options = new ArrayList<>();
+        String cmd = command.getName().toLowerCase(Locale.ROOT);
+        String first = args.length >= 1 ? args[0].toLowerCase(Locale.ROOT) : "";
+        switch (cmd) {
+            case "team" -> {
+                if (args.length == 1) options.addAll(List.of("create", "invite", "accept", "leave", "info"));
+                else if (args.length == 2 && first.equals("invite")) options.addAll(onlineNames());
+                else if (args.length == 2 && first.equals("create")) options.add("<Tag>");
+                else if (args.length == 3 && first.equals("create")) options.addAll(teams.colorNames());
+            }
+            case "stat" -> {
+                if (args.length == 1) { options.addAll(METRICS); options.add("all"); }
+                else if (args.length == 2) options.addAll(onlineNames());
+            }
+            case "leaderboard" -> { if (args.length == 1) options.addAll(METRICS); }
+            case "sigmacraft" -> {
+                if (args.length == 1) options.addAll(List.of("stat", "leaderboard"));
+                else if (args.length == 2 && first.equals("stat")) { options.addAll(METRICS); options.add("all"); }
+                else if (args.length == 2 && first.equals("leaderboard")) options.addAll(METRICS);
+                else if (args.length == 3 && first.equals("stat")) options.addAll(onlineNames());
+            }
+            case "sctop" -> {
+                if (args.length == 1) options.addAll(List.of("create", "remove"));
+                else if (args.length == 2 && first.equals("create")) options.addAll(METRICS);
+            }
+            case "scstats" -> { if (args.length == 1) options.addAll(onlineNames()); }
+            default -> { }
+        }
+        String typed = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);
+        options.removeIf(o -> !o.toLowerCase(Locale.ROOT).startsWith(typed));
+        return options;
     }
 
     public record RankRow(String name, long value) {}

@@ -6,7 +6,7 @@ author: SigmaCraft
 description: SigmaCraft Season 3 core features
 commands:
   spawn:
-    description: Teleportiert dich zum Spawn, wenn du nah genug bist.
+    description: Teleportiert dich nach kurzer Wartezeit zum Spawn.
     usage: /spawn
   scstats:
     description: Gibt Statistikdaten für die Discord-Anbindung aus.
@@ -19,14 +19,21 @@ commands:
     description: Verwaltet Top-10-Hologramme.
     usage: /sctop <create|remove>
     permission: sigmacraft.admin
+  stat:
+    description: Zeigt Statistiken von dir oder einem anderen Spieler.
+    usage: /stat <kills|deaths|blocks|diamonds|playtime|all> [Spieler]
+    aliases: [stats]
+  leaderboard:
+    description: Zeigt die Top 10 einer Statistik.
+    usage: /leaderboard <kills|deaths|blocks|diamonds|playtime>
+    aliases: [lb]
   sigmacraft:
-    description: SigmaCraft-Statistikprotokoll für Discord.
+    description: Statistik-Befehle (auch für den Discord-Bot).
     usage: /sigmacraft <stat|leaderboard> ...
-    permission: sigmacraft.stats
 permissions:
   sigmacraft.admin:
-    description: Umgeht den Spawn-Schutz und die Spawn-Reichweitenbegrenzung.
+    description: Umgeht Spawn-Schutz, Teleport-Wartezeit und Reichweitenbegrenzung.
     default: op
   sigmacraft.stats:
-    description: Darf SigmaCraft-Statistiken abfragen.
+    description: Darf /scstats für die Discord-Anbindung nutzen.
     default: op

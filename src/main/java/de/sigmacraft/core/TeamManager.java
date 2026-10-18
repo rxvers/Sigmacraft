@@ -43,6 +43,50 @@ public final class TeamManager {
         for (Player p : Bukkit.getOnlinePlayers()) if (team.equals(teamOf(p.getUniqueId()))) count++;
         return count;
     }
+    public UUID owner(String team) {
+        String raw = data.getString("teams." + team + ".owner");
+        try { return raw == null ? null : UUID.fromString(raw); } catch (IllegalArgumentException e) { return null; }
+    }
+    public List<UUID> members(String team) {
+        List<UUID> result = new ArrayList<>();
+        if (data.getConfigurationSection("members") == null) return result;
+        for (String key : data.getConfigurationSection("members").getKeys(false)) {
+            if (!team.equals(data.getString("members." + key))) continue;
+            try { result.add(UUID.fromString(key)); } catch (IllegalArgumentException ignored) { }
+        }
+        return result;
+    }
+    public List<String> colorNames() { return new ArrayList<>(new TreeSet<>(colors.keySet())); }
+
+    /** Schöne Team-Übersicht mit Leiter sowie Mitgliedern (online und offline). */
+    public void sendInfo(Player p) {
+        String team = teamOf(p.getUniqueId());
+        if (team.isEmpty()) {
+            p.sendMessage("§8[§bTeam§8] §7Du bist in keinem Team. §8» §b/team create <Tag> <Farbe>");
+            return;
+        }
+        ChatColor c = color(team);
+        UUID owner = owner(team);
+        List<UUID> all = members(team);
+        all.sort((a, b) -> {
+            if (a.equals(owner) != b.equals(owner)) return a.equals(owner) ? -1 : 1;
+            boolean ao = Bukkit.getPlayer(a) != null, bo = Bukkit.getPlayer(b) != null;
+            if (ao != bo) return ao ? -1 : 1;
+            return plugin.nameOf(a).compareToIgnoreCase(plugin.nameOf(b));
+        });
+        int online = 0;
+        for (UUID m : all) if (Bukkit.getPlayer(m) != null) online++;
+        p.sendMessage("§8▬▬▬▬▬ " + c + "§l[" + tag(team) + "] §8▬▬▬▬▬");
+        p.sendMessage("§7Teamleiter: §f" + (owner == null ? "?" : plugin.nameOf(owner)));
+        p.sendMessage("§7Mitglieder: §f" + all.size() + " §8(§a" + online + " online§8, §7" + (all.size() - online) + " offline§8)");
+        for (UUID m : all) {
+            boolean isOnline = Bukkit.getPlayer(m) != null;
+            String crown = m.equals(owner) ? " §6★" : "";
+            p.sendMessage(isOnline ? "  §a● §f" + plugin.nameOf(m) + crown : "  §8● §7" + plugin.nameOf(m) + crown);
+        }
+        p.sendMessage("§8▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬");
+    }
+
     public boolean create(Player p, String rawTag, String rawColor) {
         String team = rawTag.toLowerCase(Locale.ROOT);
         if (!team.matches("[a-z0-9]{2,12}") || !teamOf(p.getUniqueId()).isEmpty() || data.contains("teams." + team)) return false;
@@ -58,8 +102,8 @@ public final class TeamManager {
         String team = teamOf(owner.getUniqueId());
         if (team.isEmpty() || !owner.getUniqueId().toString().equals(data.getString("teams." + team + ".owner")) || !teamOf(target.getUniqueId()).isEmpty()) return false;
         invitations.put(target.getUniqueId(), team);
-        target.sendMessage(color(team) + "Du wurdest in Team [" + tag(team) + "] eingeladen. Nutze /team accept.");
-        owner.sendMessage(ChatColor.GREEN + "Einladung gesendet."); return true;
+        target.sendMessage("§8[§bTeam§8] §7Du wurdest in Team " + color(team) + "[" + tag(team) + "] §7eingeladen. §8» §b/team accept");
+        owner.sendMessage("§8[§bTeam§8] §aEinladung an §f" + target.getName() + " §agesendet."); return true;
     }
     public boolean accept(Player p) {
         String team = invitations.remove(p.getUniqueId());
