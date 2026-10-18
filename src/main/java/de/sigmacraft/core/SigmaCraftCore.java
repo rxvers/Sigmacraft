@@ -229,14 +229,14 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener {
                     }
                     default -> { sender.sendMessage("Unbekannte Statistik."); return true; }
                 }
-                String label = switch (metric) {
+                String statLabel = switch (metric) {
                     case "kills" -> "Kills";
                     case "deaths" -> "Tode";
                     case "blocks" -> "abgebaute Blöcke";
                     case "diamonds" -> "abgebaute Diamanterze";
                     default -> "Spielzeit";
                 };
-                sender.sendMessage(name + " – " + label + ": " + (metric.equals("playtime") ? formatTime(value) : value));
+                sender.sendMessage(name + " – " + statLabel + ": " + (metric.equals("playtime") ? formatTime(value) : value));
                 return true;
             }
             if (args.length == 2 && args[0].equalsIgnoreCase("leaderboard")) {

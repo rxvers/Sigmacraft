@@ -6,11 +6,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityToggleGlideEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
-import org.bukkit.event.player.PlayerToggleGlideEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.Vector;
 
@@ -59,9 +59,9 @@ public final class ElytraBoost implements Listener {
     @EventHandler public void onMoveLand(PlayerMoveEvent e) {
         Player p = e.getPlayer(); if (active.containsKey(p.getUniqueId()) && p.isOnGround()) restore(p);
     }
-    @EventHandler public void onGlide(PlayerToggleGlideEvent e) {
-        if (e.isGliding()) return;
-        if (active.containsKey(e.getPlayer().getUniqueId())) restore(e.getPlayer());
+    @EventHandler public void onGlide(EntityToggleGlideEvent e) {
+        if (e.isGliding() || !(e.getEntity() instanceof Player p)) return;
+        if (active.containsKey(p.getUniqueId())) restore(p);
     }
     @EventHandler public void onDamage(EntityDamageEvent e) {
         if (e.getEntity() instanceof Player p && active.containsKey(p.getUniqueId()) && p.getHealth() - e.getFinalDamage() <= 0) restore(p);
