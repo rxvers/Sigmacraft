@@ -2,6 +2,7 @@ package de.sigmacraft.core;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -22,6 +23,8 @@ public final class TopLeaderboard {
     private final File file;
     private YamlConfiguration data;
     private BukkitTask task;
+    private static final String TAG = "sigmacraft_board";
+    private static final String ID_TAG = "sigmacraft_board_";
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
     private static final Map<String,String> LABELS = Map.of("kills","Kills", "deaths","Tode", "diamonds","Diamanten", "blocks","Abgebaute Blöcke", "playtime","Spielzeit");
     TopLeaderboard(SigmaCraftCore plugin) {
@@ -37,7 +40,7 @@ public final class TopLeaderboard {
         data.set("boards." + id + ".world", l.getWorld().getName());
         data.set("boards." + id + ".x", l.getX()); data.set("boards." + id + ".y", l.getY()); data.set("boards." + id + ".z", l.getZ());
         data.set("boards." + id + ".metric", metric); data.set("boards." + id + ".entity", ""); save();
-        spawn(id); refresh(id); return true;
+        refresh(id); return true;
     }
     public boolean removeNearest(Player p) {
         ConfigurationSection boards = data.getConfigurationSection("boards"); if (boards == null) return false;
@@ -47,42 +50,67 @@ public final class TopLeaderboard {
             double d = l.distanceSquared(p.getLocation()); if (d < best) { best = d; nearest = id; }
         }
         if (nearest == null) return false;
-        removeEntity(nearest); data.set("boards." + nearest, null); save(); return true;
+        removeEntities(nearest); data.set("boards." + nearest, null); save(); return true;
     }
     public void refreshAll() {
         ConfigurationSection section = data.getConfigurationSection("boards"); if (section == null) return;
-        for (String id : new ArrayList<>(section.getKeys(false))) { if (findEntity(id) == null) spawn(id); refresh(id); }
+        for (String id : new ArrayList<>(section.getKeys(false))) refresh(id);
     }
-    private void spawn(String id) {
-        Location l = location(id); if (l == null || l.getWorld() == null) return;
-        TextDisplay display = l.getWorld().spawn(l, TextDisplay.class, e -> {
+    private TextDisplay spawn(String id) {
+        Location l = location(id); if (l == null || l.getWorld() == null) return null;
+        return l.getWorld().spawn(l, TextDisplay.class, e -> {
             e.setBillboard(Display.Billboard.CENTER); e.setAlignment(TextDisplay.TextAlignment.CENTER);
             e.setSeeThrough(false); e.setShadowed(true); e.setPersistent(true);
             e.setBackgroundColor(org.bukkit.Color.fromARGB(100, 10, 10, 10));
+            e.addScoreboardTag(TAG); e.addScoreboardTag(ID_TAG + id);
         });
-        data.set("boards." + id + ".entity", display.getUniqueId().toString()); save();
     }
-    private Entity findEntity(String id) {
-        String raw = data.getString("boards." + id + ".entity", "");
-        try {
-            UUID uuid = UUID.fromString(raw);
-            // Ensure the board's chunk is loaded before looking up its persistent TextDisplay.
-            Location boardLocation = location(id);
-            if (boardLocation != null && boardLocation.getWorld() != null) {
-                boardLocation.getChunk().load();
-                Entity entity = boardLocation.getWorld().getEntity(uuid);
-                if (entity != null) return entity;
-            }
-        } catch (IllegalArgumentException ignored) { }
+    private String boardIdOf(TextDisplay d) {
+        for (String tag : d.getScoreboardTags()) if (tag.startsWith(ID_TAG)) return tag.substring(ID_TAG.length());
         return null;
     }
-    private void removeEntity(String id) { Entity e = findEntity(id); if (e != null) e.remove(); }
+    /** Erkennt Hologramme dieses Plugins: per Tag oder (für ältere Versionen ohne Tag) am Text. */
+    private boolean isBoardDisplay(Entity e) {
+        if (!(e instanceof TextDisplay d)) return false;
+        if (d.getScoreboardTags().contains(TAG)) return true;
+        String plain = PlainTextComponentSerializer.plainText().serialize(d.text());
+        return plain.contains("SIGMACRAFT") && plain.contains("Top 10");
+    }
+    /** Alle Hologramm-Entities dieser Tafel (auch doppelte und alte ohne Tag in unmittelbarer Nähe). */
+    private List<TextDisplay> findDisplays(String id) {
+        List<TextDisplay> found = new ArrayList<>();
+        Location l = location(id); if (l == null || l.getWorld() == null) return found;
+        l.getChunk().getEntities(); // lädt Chunk samt Entities, damit nichts doppelt erzeugt wird
+        for (Entity e : l.getWorld().getNearbyEntities(l, 4, 4, 4)) {
+            if (!isBoardDisplay(e) || !(e instanceof TextDisplay d)) continue;
+            String owner = boardIdOf(d);
+            if (owner == null || owner.equals(id)) found.add(d);
+        }
+        return found;
+    }
+    private void removeEntities(String id) { for (TextDisplay d : findDisplays(id)) d.remove(); }
+    /** Entfernt alle SigmaCraft-Hologramme im Umkreis und erzeugt die gespeicherten neu. */
+    public int cleanNear(Player p, double radius) {
+        int count = 0;
+        for (Entity e : p.getWorld().getNearbyEntities(p.getLocation(), radius, 400, radius, this::isBoardDisplay)) { e.remove(); count++; }
+        Bukkit.getScheduler().runTask(plugin, this::refreshAll);
+        return count;
+    }
     private Location location(String id) {
         String world = data.getString("boards." + id + ".world", "world"); World w = Bukkit.getWorld(world); if (w == null) return null;
         return new Location(w, data.getDouble("boards." + id + ".x"), data.getDouble("boards." + id + ".y"), data.getDouble("boards." + id + ".z"));
     }
     private void refresh(String id) {
-        Entity entity = findEntity(id); if (!(entity instanceof TextDisplay display)) return;
+        List<TextDisplay> found = findDisplays(id);
+        TextDisplay display;
+        if (found.isEmpty()) display = spawn(id);
+        else {
+            display = found.get(0);
+            for (int i = 1; i < found.size(); i++) found.get(i).remove(); // doppelte entfernen
+            display.addScoreboardTag(TAG); display.addScoreboardTag(ID_TAG + id);
+        }
+        if (display == null) return;
+        data.set("boards." + id + ".entity", display.getUniqueId().toString());
         String metric = data.getString("boards." + id + ".metric", "kills");
         List<SigmaCraftCore.RankRow> rows = plugin.top(metric, 10);
         StringBuilder out = new StringBuilder("&b&lSIGMACRAFT &8• &fTop 10\n&7").append(LABELS.getOrDefault(metric, metric)).append("\n");

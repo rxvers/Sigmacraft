@@ -12,7 +12,6 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryType;
-import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.ItemStack;
@@ -31,12 +30,11 @@ import java.util.UUID;
 public final class ElytraBoost implements Listener {
     private final SigmaCraftCore plugin;
     private final Map<UUID, ItemStack> chestplates = new HashMap<>();
-    private final Map<UUID, Long> eligible = new HashMap<>();
     private final Map<UUID, Long> active = new HashMap<>();
     private final Map<UUID, BossBar> bars = new HashMap<>();
-    private static final Component BAR_TEXT = Component.text("✦ Drücke ", NamedTextColor.LIGHT_PURPLE)
+    private static final Component BAR_TEXT = Component.text("✦ In der Luft ", NamedTextColor.LIGHT_PURPLE)
             .append(Component.text("F", NamedTextColor.WHITE, TextDecoration.BOLD))
-            .append(Component.text(", um loszufliegen ✦", NamedTextColor.LIGHT_PURPLE));
+            .append(Component.text(" drücken, um loszufliegen ✦", NamedTextColor.LIGHT_PURPLE));
 
     ElytraBoost(SigmaCraftCore plugin) {
         this.plugin = plugin;
@@ -46,29 +44,19 @@ public final class ElytraBoost implements Listener {
     private double radius() { return plugin.getConfig().getDouble("elytra.eligible-radius", 80.0); }
 
     @EventHandler
-    public void onMove(PlayerMoveEvent e) {
-        if (e.getTo() == null || e.getFrom().getY() <= e.getTo().getY()) return;
-        Player p = e.getPlayer();
-        if (active.containsKey(p.getUniqueId())) return;
-        if (!plugin.isNearSpawn(p.getLocation(), radius())) return;
-        if (p.getLocation().getY() <= plugin.getConfig().getDouble("elytra.min-y", 55.0) || p.getFallDistance() > 1.5f) {
-            eligible.put(p.getUniqueId(), System.currentTimeMillis() + 8000L);
-        }
-    }
-
-    @EventHandler
     public void onSwap(PlayerSwapHandItemsEvent e) {
         Player p = e.getPlayer();
         UUID id = p.getUniqueId();
         long now = System.currentTimeMillis();
         if (!plugin.getConfig().getBoolean("elytra.enabled", true)) return;
-        if (eligible.getOrDefault(id, 0L) < now || active.containsKey(id)) return;
+        if (active.containsKey(id)) return;
         if (p.isOnGround() || p.isInsideVehicle() || p.isGliding()) return;
+        // Nur in der Luft nach einem Fall (kein normaler Sprung).
+        if (p.getFallDistance() <= 1.5f && p.getLocation().getY() > plugin.getConfig().getDouble("elytra.min-y", 55.0)) return;
         // Nur am Spawn nutzbar.
         if (!plugin.isNearSpawn(p.getLocation(), radius())) return;
 
         e.setCancelled(true);
-        eligible.remove(id);
 
         ItemStack chest = p.getInventory().getChestplate();
         boolean ownElytra = chest != null && chest.getType() == Material.ELYTRA;
@@ -90,7 +78,7 @@ public final class ElytraBoost implements Listener {
     /** Prüft regelmäßig, ob Spieler mit Boost-Elytra gelandet sind. */
     private void checkLandings() {
         long now = System.currentTimeMillis();
-        updateBars(now);
+        updateBars();
         for (UUID id : new ArrayList<>(active.keySet())) {
             Player p = plugin.getServer().getPlayer(id);
             if (p == null) { active.remove(id); chestplates.remove(id); continue; }
@@ -99,23 +87,18 @@ public final class ElytraBoost implements Listener {
         }
     }
 
-    /** Zeigt eine Boss-Bar (wie beim Enderdrachen), solange der Boost per F nutzbar ist. */
-    private void updateBars(long now) {
+    /** Zeigt dauerhaft eine Boss-Bar (wie beim Enderdrachen), solange der Spieler am Spawn ist. */
+    private void updateBars() {
         for (Player p : plugin.getServer().getOnlinePlayers()) {
             UUID id = p.getUniqueId();
-            long until = eligible.getOrDefault(id, 0L);
-            boolean show = until > now && !active.containsKey(id) && !p.isOnGround() && !p.isGliding();
+            boolean show = plugin.getConfig().getBoolean("elytra.enabled", true)
+                    && !active.containsKey(id) && !p.isGliding() && plugin.isNearSpawn(p.getLocation(), radius());
             BossBar bar = bars.get(id);
-            if (show) {
-                float progress = Math.max(0f, Math.min(1f, (until - now) / 8000f));
-                if (bar == null) {
-                    bar = BossBar.bossBar(BAR_TEXT, progress, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
-                    bars.put(id, bar);
-                    p.showBossBar(bar);
-                } else {
-                    bar.progress(progress);
-                }
-            } else if (bar != null) {
+            if (show && bar == null) {
+                bar = BossBar.bossBar(BAR_TEXT, 1.0f, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
+                bars.put(id, bar);
+                p.showBossBar(bar);
+            } else if (!show && bar != null) {
                 p.hideBossBar(bar);
                 bars.remove(id);
             }
@@ -156,7 +139,6 @@ public final class ElytraBoost implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         restore(e.getPlayer());
-        eligible.remove(e.getPlayer().getUniqueId());
         bars.remove(e.getPlayer().getUniqueId());
     }
 
@@ -167,7 +149,6 @@ public final class ElytraBoost implements Listener {
             if (holder != null) holder.hideBossBar(entry.getValue());
         }
         bars.clear();
-        eligible.clear();
     }
 
     private void restore(Player p) {

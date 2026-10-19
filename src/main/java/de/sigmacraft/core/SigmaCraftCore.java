@@ -314,9 +314,14 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
             if (args.length == 2 && args[0].equalsIgnoreCase("create")) {
                 if (leaderboards.create(p, args[1].toLowerCase(Locale.ROOT))) p.sendMessage("§aTop-10-Hologramm erstellt.");
                 else p.sendMessage("§cKategorie: kills, deaths, diamonds, blocks, playtime");
+            } else if (args.length >= 1 && args[0].equalsIgnoreCase("clean")) {
+                double radius = 150;
+                if (args.length >= 2) { try { radius = Math.min(1000, Math.max(5, Double.parseDouble(args[1]))); } catch (NumberFormatException ignored) { } }
+                int removed = leaderboards.cleanNear(p, radius);
+                p.sendMessage("§a" + removed + " Hologramm(e) im Umkreis von " + (int) radius + " Blöcken entfernt. Gespeicherte Tafeln werden neu erzeugt.");
             } else if (args.length == 1 && args[0].equalsIgnoreCase("remove")) {
                 p.sendMessage(leaderboards.removeNearest(p) ? "§aNächstes SigmaCraft-Hologramm entfernt." : "§cKein Hologramm in deiner Nähe.");
-            } else p.sendMessage("§b/sctop create <kills|deaths|diamonds|blocks|playtime> §7| /sctop remove");
+            } else p.sendMessage("§b/sctop create <kills|deaths|diamonds|blocks|playtime> §7| /sctop remove | /sctop clean [Radius]");
             return true;
         }
         if (command.getName().equalsIgnoreCase("spawn")) {
@@ -700,7 +705,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
                 else if (args.length == 3 && first.equals("stat")) options.addAll(onlineNames());
             }
             case "sctop" -> {
-                if (args.length == 1) options.addAll(List.of("create", "remove"));
+                if (args.length == 1) options.addAll(List.of("create", "remove", "clean"));
                 else if (args.length == 2 && first.equals("create")) options.addAll(METRICS);
             }
             case "scstats", "admin" -> { if (args.length == 1) options.addAll(onlineNames()); }

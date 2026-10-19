@@ -23,7 +23,7 @@ Voraussetzungen: JDK 25 und Gradle 9.x. Paper dokumentiert die API-Abhängigkeit
 - `/stat [kills|deaths|blocks|diamonds|playtime|all] [Spieler]` — für alle Spieler (Alias `/stats`)
 - `/leaderboard <kills|deaths|blocks|diamonds|playtime>` — Top 10, für alle Spieler (Alias `/lb`)
 - `/sigmacraft stat ...` und `/sigmacraft leaderboard ...` — weiterhin möglich, für alle Spieler; Konsole/RCON bekommt wie bisher Klartext für den Discord-Bot
-- `/sctop create <kills|deaths|diamonds|blocks|playtime>` / `/sctop remove` — Hologramme (Admin)
+- `/sctop create <kills|deaths|diamonds|blocks|playtime>` / `/sctop remove` / `/sctop clean [Radius]` — Hologramme (Admin)
 - `/spawn` — Teleport nach 5 Sekunden ohne Bewegung und ohne Schaden (Admins sofort)
 - `/scstats <Spielername>` — maschinenlesbare Zeile für den Discord-Bot (Berechtigung `sigmacraft.stats`)
 
