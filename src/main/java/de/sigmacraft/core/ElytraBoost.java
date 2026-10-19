@@ -1,5 +1,9 @@
 package de.sigmacraft.core;
 
+import net.kyori.adventure.bossbar.BossBar;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -29,6 +33,10 @@ public final class ElytraBoost implements Listener {
     private final Map<UUID, ItemStack> chestplates = new HashMap<>();
     private final Map<UUID, Long> eligible = new HashMap<>();
     private final Map<UUID, Long> active = new HashMap<>();
+    private final Map<UUID, BossBar> bars = new HashMap<>();
+    private static final Component BAR_TEXT = Component.text("✦ Drücke ", NamedTextColor.LIGHT_PURPLE)
+            .append(Component.text("F", NamedTextColor.WHITE, TextDecoration.BOLD))
+            .append(Component.text(", um loszufliegen ✦", NamedTextColor.LIGHT_PURPLE));
 
     ElytraBoost(SigmaCraftCore plugin) {
         this.plugin = plugin;
@@ -82,11 +90,35 @@ public final class ElytraBoost implements Listener {
     /** Prüft regelmäßig, ob Spieler mit Boost-Elytra gelandet sind. */
     private void checkLandings() {
         long now = System.currentTimeMillis();
+        updateBars(now);
         for (UUID id : new ArrayList<>(active.keySet())) {
             Player p = plugin.getServer().getPlayer(id);
             if (p == null) { active.remove(id); chestplates.remove(id); continue; }
             if (now - active.get(id) < 750L) continue;
             if (p.isOnGround() || p.isInWater() || p.isSwimming() || p.isInsideVehicle()) restore(p);
+        }
+    }
+
+    /** Zeigt eine Boss-Bar (wie beim Enderdrachen), solange der Boost per F nutzbar ist. */
+    private void updateBars(long now) {
+        for (Player p : plugin.getServer().getOnlinePlayers()) {
+            UUID id = p.getUniqueId();
+            long until = eligible.getOrDefault(id, 0L);
+            boolean show = until > now && !active.containsKey(id) && !p.isOnGround() && !p.isGliding();
+            BossBar bar = bars.get(id);
+            if (show) {
+                float progress = Math.max(0f, Math.min(1f, (until - now) / 8000f));
+                if (bar == null) {
+                    bar = BossBar.bossBar(BAR_TEXT, progress, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
+                    bars.put(id, bar);
+                    p.showBossBar(bar);
+                } else {
+                    bar.progress(progress);
+                }
+            } else if (bar != null) {
+                p.hideBossBar(bar);
+                bars.remove(id);
+            }
         }
     }
 
@@ -125,10 +157,16 @@ public final class ElytraBoost implements Listener {
     public void onQuit(PlayerQuitEvent e) {
         restore(e.getPlayer());
         eligible.remove(e.getPlayer().getUniqueId());
+        bars.remove(e.getPlayer().getUniqueId());
     }
 
     public void restoreAll() {
         for (Player player : plugin.getServer().getOnlinePlayers()) restore(player);
+        for (Map.Entry<UUID, BossBar> entry : bars.entrySet()) {
+            Player holder = plugin.getServer().getPlayer(entry.getKey());
+            if (holder != null) holder.hideBossBar(entry.getValue());
+        }
+        bars.clear();
         eligible.clear();
     }
 

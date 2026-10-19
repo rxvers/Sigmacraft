@@ -27,13 +27,21 @@ Voraussetzungen: JDK 25 und Gradle 9.x. Paper dokumentiert die API-Abhängigkeit
 - `/spawn` — Teleport nach 5 Sekunden ohne Bewegung und ohne Schaden (Admins sofort)
 - `/scstats <Spielername>` — maschinenlesbare Zeile für den Discord-Bot (Berechtigung `sigmacraft.stats`)
 
+## Admin-Panel
+
+`/admin` (Berechtigung `sigmacraft.admin`) öffnet eine Spielerliste. Pro Spieler: IP (inkl. weiterer Accounts mit gleicher IP), Enderchest (nur Ansicht), Ban und Mute mit Dauer (1h, 3h, 12h, 1d, 3d, 7d, 30d, permanent oder eigene Eingabe wie `90m`, `2d`, `1w`) und Grund sowie ein Strafen-Log. Offline-Spieler: `/admin <Name>`. Alle Strafen stehen in `plugins/SigmaCraftCore/punishments.yml`.
+
+## Creeper
+
+Creeper-Explosionen richten keinen Schaden an (`creeper.disable-explosions`).
+
 ## Top-1-Symbole
 
 Wer in einer Rangliste auf Platz 1 steht (Wert > 0), bekommt im Chat und in der Tablist ein Symbol: ⚔ Kills, ☠ Tode, ◆ Diamanten, ⛏ Blöcke, ◷ Spielzeit. Die Symbole werden alle 10 Sekunden aktualisiert.
 
 ## Spawn-Schutz
 
-Im Schutzradius können Nicht-Admins weder Blöcke abbauen noch platzieren (auch keine Eimer).
+Im Schutzradius können Nicht-Admins weder Blöcke abbauen noch platzieren (auch keine Eimer). Türen, Falltüren, Zauntore sowie Kisten, Fässer, Öfen und andere Behälter lassen sich ebenfalls nicht benutzen. Am Spawn erscheint beim Fallen eine Boss-Bar mit dem F-Hinweis.
 
 ## Elytra-Boost
 

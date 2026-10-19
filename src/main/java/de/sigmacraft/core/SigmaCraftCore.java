@@ -9,23 +9,35 @@ import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.Container;
+import org.bukkit.block.data.Openable;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.ChestBoat;
+import org.bukkit.entity.Creeper;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Mob;
+import org.bukkit.entity.minecart.HopperMinecart;
+import org.bukkit.entity.minecart.StorageMinecart;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -57,6 +69,8 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     private TeamManager teams;
     private TopLeaderboard leaderboards;
     private ElytraBoost elytraBoost;
+    private PunishmentManager punishments;
+    private AdminPanel adminPanel;
 
     @Override
     public void onEnable() {
@@ -66,9 +80,12 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         teams = new TeamManager(this);
         leaderboards = new TopLeaderboard(this);
         elytraBoost = new ElytraBoost(this);
+        punishments = new PunishmentManager(new File(getDataFolder(), "punishments.yml"));
+        adminPanel = new AdminPanel(this, punishments);
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getPluginManager().registerEvents(elytraBoost, this);
-        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard")) {
+        Bukkit.getPluginManager().registerEvents(adminPanel, this);
+        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard", "admin")) {
             PluginCommand cmd = getCommand(name);
             if (cmd == null) continue;
             cmd.setExecutor(this);
@@ -96,6 +113,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         if (playtimeTask != null) playtimeTask.cancel();
         if (leaderboards != null) leaderboards.stop();
         if (elytraBoost != null) elytraBoost.restoreAll();
+        if (punishments != null) punishments.save();
         saveStats();
     }
 
@@ -194,6 +212,47 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         // Persist in batches rather than writing the YAML file for every block.
     }
 
+    @EventHandler(ignoreCancelled = true)
+    public void onInteractBlock(PlayerInteractEvent event) {
+        if (event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        Block block = event.getClickedBlock();
+        Player player = event.getPlayer();
+        if (block == null || !insideProtection(block.getLocation()) || player.hasPermission("sigmacraft.admin")) return;
+        // Türen, Falltüren, Zauntore und alle Behälter (Kisten, Fässer, Öfen, Trichter ...) sperren.
+        if (block.getBlockData() instanceof Openable || block.getState(false) instanceof Container) {
+            event.setCancelled(true);
+            if (event.getHand() == org.bukkit.inventory.EquipmentSlot.HAND) {
+                player.sendMessage(color(getConfig().getString("messages.protected-use", "&cHey, das kannst du am Spawn nicht benutzen!")));
+            }
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onInteractEntity(PlayerInteractEntityEvent event) {
+        Entity entity = event.getRightClicked();
+        Player player = event.getPlayer();
+        if (!(entity instanceof StorageMinecart || entity instanceof HopperMinecart || entity instanceof ChestBoat)) return;
+        if (!insideProtection(entity.getLocation()) || player.hasPermission("sigmacraft.admin")) return;
+        event.setCancelled(true);
+        player.sendMessage(color(getConfig().getString("messages.protected-use", "&cHey, das kannst du am Spawn nicht benutzen!")));
+    }
+
+    // ---------- Creeper-Schutz ----------
+
+    @EventHandler(ignoreCancelled = true)
+    public void onCreeperExplode(EntityExplodeEvent event) {
+        if (event.getEntity() instanceof Creeper && getConfig().getBoolean("creeper.disable-explosions", true)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onCreeperDamage(EntityDamageByEntityEvent event) {
+        if (event.getDamager() instanceof Creeper && getConfig().getBoolean("creeper.disable-explosions", true)) {
+            event.setCancelled(true);
+        }
+    }
+
     private boolean denyInSpawn(Player player, Location location) {
         if (!insideProtection(location) || player.hasPermission("sigmacraft.admin")) return false;
         player.sendMessage(color(getConfig().getString("messages.protected-place", "&cHey, hier können keine Blöcke platziert werden!")));
@@ -215,7 +274,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         if (denyInSpawn(event.getPlayer(), event.getBlock().getLocation())) event.setCancelled(true);
     }
 
-    @EventHandler
+    @EventHandler(ignoreCancelled = true)
     public void onChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
         String badges = topBadges(player.getUniqueId());
@@ -287,6 +346,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
             }
             return true;
         }
+        if (command.getName().equalsIgnoreCase("admin")) return adminPanel.command(sender, args);
         if (command.getName().equalsIgnoreCase("stat")) return handleStat(sender, args);
         if (command.getName().equalsIgnoreCase("leaderboard")) return handleLeaderboard(sender, args);
         if (command.getName().equalsIgnoreCase("sigmacraft")) {
@@ -517,7 +577,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         return metric.equals("playtime") ? formatTime(value) : Long.toString(value);
     }
 
-    private UUID resolveId(String name, boolean allowOfflineLookup) {
+    UUID resolveId(String name, boolean allowOfflineLookup) {
         Player online = Bukkit.getPlayerExact(name);
         if (online != null) return online.getUniqueId();
         ConfigurationSection section = stats.getConfigurationSection("players");
@@ -643,7 +703,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
                 if (args.length == 1) options.addAll(List.of("create", "remove"));
                 else if (args.length == 2 && first.equals("create")) options.addAll(METRICS);
             }
-            case "scstats" -> { if (args.length == 1) options.addAll(onlineNames()); }
+            case "scstats", "admin" -> { if (args.length == 1) options.addAll(onlineNames()); }
             default -> { }
         }
         String typed = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);

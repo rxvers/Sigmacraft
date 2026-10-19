@@ -19,6 +19,10 @@ commands:
     description: Verwaltet Top-10-Hologramme.
     usage: /sctop <create|remove>
     permission: sigmacraft.admin
+  admin:
+    description: Öffnet das Admin-Panel (IP, Enderchest, Ban, Mute, Strafen-Log).
+    usage: /admin [Spieler]
+    permission: sigmacraft.admin
   stat:
     description: Zeigt Statistiken von dir oder einem anderen Spieler.
     usage: /stat <kills|deaths|blocks|diamonds|playtime|all> [Spieler]
