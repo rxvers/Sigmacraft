@@ -9,6 +9,8 @@ spawn:
   command-radius: 300.0
   teleport-delay-seconds: 5
   block-mobs: true
+  no-pvp: true
+  no-damage: true
 messages:
   protected: '&cHey, hier können keine Blöcke zerstört werden!'
   protected-place: '&cHey, hier können keine Blöcke platziert werden!'
@@ -25,3 +27,11 @@ elytra:
 
 creeper:
   disable-explosions: true
+
+worlds:
+  disable-nether: true
+  disable-end: true
+
+access:
+  kick-message: "&c&lSigmaCraft ist noch nicht eröffnet\n\n&7Der Server ist derzeit nur für ausgewählte Spieler offen.\n&7Schau bald wieder vorbei!"
+  motd: "&b&lSigmaCraft &8» &eEröffnung bald!"

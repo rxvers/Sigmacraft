@@ -8,6 +8,8 @@ import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.World;
+import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.block.data.Openable;
@@ -21,10 +23,12 @@ import org.bukkit.entity.ChestBoat;
 import org.bukkit.entity.Creeper;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Mob;
+import org.bukkit.entity.Projectile;
 import org.bukkit.entity.minecart.HopperMinecart;
 import org.bukkit.entity.minecart.StorageMinecart;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
@@ -33,11 +37,15 @@ import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.EntityPortalEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerPortalEvent;
+import org.bukkit.event.world.PortalCreateEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
@@ -71,6 +79,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     private ElytraBoost elytraBoost;
     private PunishmentManager punishments;
     private AdminPanel adminPanel;
+    private AccessControl accessControl;
 
     @Override
     public void onEnable() {
@@ -82,10 +91,12 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         elytraBoost = new ElytraBoost(this);
         punishments = new PunishmentManager(new File(getDataFolder(), "punishments.yml"));
         adminPanel = new AdminPanel(this, punishments);
+        accessControl = new AccessControl(this);
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getPluginManager().registerEvents(elytraBoost, this);
         Bukkit.getPluginManager().registerEvents(adminPanel, this);
-        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard", "admin")) {
+        Bukkit.getPluginManager().registerEvents(accessControl, this);
+        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard", "admin", "access")) {
             PluginCommand cmd = getCommand(name);
             if (cmd == null) continue;
             cmd.setExecutor(this);
@@ -143,12 +154,15 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     public void onJoin(PlayerJoinEvent event) {
         setName(event.getPlayer().getUniqueId(), event.getPlayer().getName());
         if (teams != null) teams.apply(event.getPlayer());
+        event.joinMessage(LEGACY.deserialize("&8[&a+&8] &7" + event.getPlayer().getName()));
         refreshAllTabs();
         saveStats();
+        Bukkit.getScheduler().runTask(this, () -> enforceDimension(event.getPlayer()));
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
+        event.quitMessage(LEGACY.deserialize("&8[&c-&8] &7" + event.getPlayer().getName()));
         UUID id = event.getPlayer().getUniqueId();
         cancelTeleport(id, null);
         lastTabUpdate.remove(id);
@@ -185,6 +199,9 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     @EventHandler
     public void onDeath(PlayerDeathEvent event) {
         Player victim = event.getEntity();
+        Location deathLoc = victim.getLocation();
+        victim.sendMessage(color("&8[&cTod&8] &7Du bist gestorben bei &f" + deathLoc.getBlockX() + ", " + deathLoc.getBlockY() + ", " + deathLoc.getBlockZ()
+                + " &7(" + deathLoc.getWorld().getName() + ")"));
         add(victim.getUniqueId(), "deaths", 1);
         setName(victim.getUniqueId(), victim.getName());
         Player killer = victim.getKiller();
@@ -235,6 +252,115 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         if (!insideProtection(entity.getLocation()) || player.hasPermission("sigmacraft.admin")) return;
         event.setCancelled(true);
         player.sendMessage(color(getConfig().getString("messages.protected-use", "&cHey, das kannst du am Spawn nicht benutzen!")));
+    }
+
+    // ---------- Kein PvP / kein Schaden am Spawn ----------
+
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onSpawnDamage(EntityDamageEvent event) {
+        if (!(event.getEntity() instanceof Player victim) || !insideProtection(victim.getLocation())) return;
+        EntityDamageEvent.DamageCause cause = event.getCause();
+        if (cause == EntityDamageEvent.DamageCause.VOID || cause == EntityDamageEvent.DamageCause.KILL
+                || cause == EntityDamageEvent.DamageCause.SUICIDE) return;
+        boolean pvp = false;
+        if (event instanceof EntityDamageByEntityEvent byEntity) {
+            Entity damager = byEntity.getDamager();
+            if (damager instanceof Projectile projectile && projectile.getShooter() instanceof Entity shooter) damager = shooter;
+            pvp = damager instanceof Player;
+        }
+        if (getConfig().getBoolean("spawn.no-damage", true) || (pvp && getConfig().getBoolean("spawn.no-pvp", true))) {
+            event.setCancelled(true);
+        }
+    }
+
+    // ---------- Nether / End deaktivieren ----------
+
+    public boolean isDimensionDisabled(String which) {
+        return getConfig().getBoolean("worlds.disable-" + which, true);
+    }
+
+    /** Schaltet Nether ("nether") oder End ("end") um und gibt den neuen Zustand (true = deaktiviert) zurück. */
+    public boolean toggleDimension(String which) {
+        boolean now = !isDimensionDisabled(which);
+        getConfig().set("worlds.disable-" + which, now);
+        saveConfig();
+        if (now) for (Player p : Bukkit.getOnlinePlayers()) enforceDimension(p);
+        return now;
+    }
+
+    private boolean dimensionDisabled(World.Environment env) {
+        return (env == World.Environment.NETHER && isDimensionDisabled("nether"))
+                || (env == World.Environment.THE_END && isDimensionDisabled("end"));
+    }
+
+    /** Wer in einer deaktivierten Dimension steht, wird (außer Admins) zum Spawn gebracht. */
+    private void enforceDimension(Player p) {
+        if (p.hasPermission("sigmacraft.admin") || !dimensionDisabled(p.getWorld().getEnvironment())) return;
+        Location spawn = configuredSpawn();
+        if (spawn == null) return;
+        p.teleport(spawn);
+        p.sendMessage(color("&cDiese Dimension ist deaktiviert. Du wurdest zum Spawn gebracht."));
+    }
+
+    @EventHandler
+    public void onWorldChange(PlayerChangedWorldEvent event) {
+        Bukkit.getScheduler().runTask(this, () -> enforceDimension(event.getPlayer()));
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPlayerPortal(PlayerPortalEvent event) {
+        Player p = event.getPlayer();
+        Location to = event.getTo();
+        if (p.hasPermission("sigmacraft.admin") || to == null || to.getWorld() == null) return;
+        if (dimensionDisabled(to.getWorld().getEnvironment())) {
+            event.setCancelled(true);
+            p.sendMessage(color("&cDiese Dimension ist derzeit deaktiviert."));
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onEntityPortal(EntityPortalEvent event) {
+        Location to = event.getTo();
+        if (to != null && to.getWorld() != null && dimensionDisabled(to.getWorld().getEnvironment())) event.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onPortalCreate(PortalCreateEvent event) {
+        if (event.getEntity() instanceof Player p && p.hasPermission("sigmacraft.admin")) return;
+        if (isDimensionDisabled("nether") && (event.getReason() == PortalCreateEvent.CreateReason.FIRE
+                || event.getReason() == PortalCreateEvent.CreateReason.NETHER_PAIR)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onEnderEye(PlayerInteractEvent event) {
+        if (!isDimensionDisabled("end") || event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        Block block = event.getClickedBlock();
+        if (block == null || block.getType() != Material.END_PORTAL_FRAME) return;
+        if (event.getItem() == null || event.getItem().getType() != Material.ENDER_EYE) return;
+        if (event.getPlayer().hasPermission("sigmacraft.admin")) return;
+        event.setCancelled(true);
+        event.getPlayer().sendMessage(color("&cDas End ist derzeit deaktiviert."));
+    }
+
+    // ---------- Daten löschen (vom Admin-Panel genutzt) ----------
+
+    /** Setzt die SigmaCraft-Statistiken zurück (für einen Spieler oder, bei null, für alle). */
+    void clearOurStats(UUID only) {
+        ConfigurationSection section = stats.getConfigurationSection("players");
+        if (section != null) {
+            for (String raw : section.getKeys(false)) {
+                if (only != null && !raw.equals(only.toString())) continue;
+                for (String key : List.of("kills", "deaths", "blocks_mined", "diamonds_mined", "playtime_seconds")) {
+                    stats.set("players." + raw + "." + key, null);
+                }
+            }
+        }
+        saveStats();
+        recomputeTop();
+        refreshAllTabs();
+        leaderboards.refreshAll();
     }
 
     // ---------- Creeper-Schutz ----------
@@ -304,6 +430,23 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
                 case "accept" -> p.sendMessage(pre + (teams.accept(p) ? "§aDu bist dem Team beigetreten." : "§cKeine gültige Einladung vorhanden oder du hast bereits ein Team."));
                 case "leave" -> p.sendMessage(pre + (teams.leave(p) ? "§eDu hast das Team verlassen." : "§cDu bist in keinem Team."));
                 case "info" -> teams.sendInfo(p);
+                case "coordssave" -> {
+                    if (args.length != 2) { p.sendMessage(pre + "§c/team coordssave <Name>"); return true; }
+                    saveTeamCoords(p, pre, args[1]);
+                }
+                case "coords" -> {
+                    String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
+                    if (sub.equals("list")) teams.sendCoords(p);
+                    else if (sub.equals("save") && args.length == 3) saveTeamCoords(p, pre, args[2]);
+                    else if (sub.equals("delete") && args.length == 3) {
+                        switch (teams.deleteCoords(p, args[2])) {
+                            case 0 -> p.sendMessage(pre + "§aKoordinate §f" + args[2] + " §agelöscht.");
+                            case 1 -> p.sendMessage(pre + "§cDu bist in keinem Team.");
+                            case 2 -> p.sendMessage(pre + "§cKoordinate nicht gefunden.");
+                            default -> p.sendMessage(pre + "§cNur der Ersteller oder der Teamleiter kann sie löschen.");
+                        }
+                    } else p.sendMessage(pre + "§c/team coords list §7| §c/team coords delete <Name>");
+                }
                 default -> teamHelp(p);
             }
             return true;
@@ -352,6 +495,7 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
             return true;
         }
         if (command.getName().equalsIgnoreCase("admin")) return adminPanel.command(sender, args);
+        if (command.getName().equalsIgnoreCase("access")) return accessControl.command(sender, args);
         if (command.getName().equalsIgnoreCase("stat")) return handleStat(sender, args);
         if (command.getName().equalsIgnoreCase("leaderboard")) return handleLeaderboard(sender, args);
         if (command.getName().equalsIgnoreCase("sigmacraft")) {
@@ -499,12 +643,23 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         return off.getName() == null ? id.toString().substring(0, 8) : off.getName();
     }
 
+    private void saveTeamCoords(Player p, String pre, String name) {
+        switch (teams.saveCoords(p, name)) {
+            case 0 -> p.sendMessage(pre + "§aKoordinate §f" + name + " §agespeichert. §7Das ganze Team sieht sie mit §b/team coords list§7.");
+            case 1 -> p.sendMessage(pre + "§cDu bist in keinem Team.");
+            case 2 -> p.sendMessage(pre + "§cUngültiger Name. §7Erlaubt: Buchstaben, Zahlen, _ und - (max. 20 Zeichen).");
+            default -> p.sendMessage(pre + "§cLimit erreicht (max. 20). §7Lösche eine mit §b/team coords delete <Name>§7.");
+        }
+    }
+
     private void teamHelp(Player p) {
         p.sendMessage("§8▬▬▬▬ §b§lTEAM §8▬▬▬▬");
         p.sendMessage("§b/team create §7<Tag> <Farbe>");
         p.sendMessage("§b/team invite §7<Spieler>");
         p.sendMessage("§b/team accept §8| §b/team leave");
         p.sendMessage("§b/team info §7- Leiter und Mitglieder");
+        p.sendMessage("§b/team coordssave §7<Name> §8| §b/team coords list");
+        p.sendMessage("§b/team coords delete §7<Name>");
     }
 
     // ---------- /spawn mit Wartezeit ----------
@@ -581,6 +736,8 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     private String valueText(String metric, long value) {
         return metric.equals("playtime") ? formatTime(value) : Long.toString(value);
     }
+
+    AccessControl access() { return accessControl; }
 
     UUID resolveId(String name, boolean allowOfflineLookup) {
         Player online = Bukkit.getPlayerExact(name);
@@ -688,9 +845,12 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         String first = args.length >= 1 ? args[0].toLowerCase(Locale.ROOT) : "";
         switch (cmd) {
             case "team" -> {
-                if (args.length == 1) options.addAll(List.of("create", "invite", "accept", "leave", "info"));
+                if (args.length == 1) options.addAll(List.of("create", "invite", "accept", "leave", "info", "coordssave", "coords"));
                 else if (args.length == 2 && first.equals("invite")) options.addAll(onlineNames());
                 else if (args.length == 2 && first.equals("create")) options.add("<Tag>");
+                else if (args.length == 2 && first.equals("coordssave")) options.add("<Name>");
+                else if (args.length == 2 && first.equals("coords")) options.addAll(List.of("list", "delete", "save"));
+                else if (args.length == 3 && first.equals("coords") && args[1].equalsIgnoreCase("delete") && sender instanceof Player tp) options.addAll(teams.coordNames(tp.getUniqueId()));
                 else if (args.length == 3 && first.equals("create")) options.addAll(teams.colorNames());
             }
             case "stat" -> {
@@ -707,6 +867,11 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
             case "sctop" -> {
                 if (args.length == 1) options.addAll(List.of("create", "remove", "clean"));
                 else if (args.length == 2 && first.equals("create")) options.addAll(METRICS);
+            }
+            case "access" -> {
+                if (args.length == 1) options.addAll(List.of("on", "off", "status", "add", "remove", "list"));
+                else if (args.length == 2 && first.equals("add")) options.addAll(onlineNames());
+                else if (args.length == 2 && first.equals("remove")) options.addAll(accessControl.names());
             }
             case "scstats", "admin" -> { if (args.length == 1) options.addAll(onlineNames()); }
             default -> { }

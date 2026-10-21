@@ -27,6 +27,23 @@ Voraussetzungen: JDK 25 und Gradle 9.x. Paper dokumentiert die API-Abhängigkeit
 - `/spawn` — Teleport nach 5 Sekunden ohne Bewegung und ohne Schaden (Admins sofort)
 - `/scstats <Spielername>` — maschinenlesbare Zeile für den Discord-Bot (Berechtigung `sigmacraft.stats`)
 
+## Neu in dieser Version
+
+- **Spawn:** kein PvP und kein Schaden im Schutzradius (`spawn.no-pvp`, `spawn.no-damage`).
+- **Team-Koordinaten:** `/team coordssave <Name>`, `/team coords list`, `/team coords delete <Name>`.
+- **Nether/End:** per Config (`worlds.disable-nether`, `worlds.disable-end`) oder im Admin-Panel umschaltbar. Admins sind ausgenommen.
+- **Admin-Panel:** Inventar ansehen, Daten löschen (Stats, Achievements, Inventar/Spielerdaten) für einen Spieler oder alle, mit Bestätigung; Teleport zu/holen, Einfrieren.
+- **Extras:** Todeskoordinaten im Chat, schlichte Join-/Quit-Meldungen.
+
+## Vorab-Zugang (vor der Eröffnung)
+
+Zusätzlich zur normalen Whitelist gibt es eine Zugangsliste. Ist der Vorab-Zugang aktiv, dürfen nur Spieler auf dieser Liste (und Operatoren) joinen, auch wenn andere bereits gewhitelisted sind.
+
+- `/access on` / `/access off` — einschalten (nicht zugelassene Spieler werden gekickt) / Server freigeben
+- `/access add <Name>`, `/access remove <Name>`, `/access list`, `/access status`
+- Auch im Admin-Panel: Schalter in der Spielerliste und pro Spieler. Zugelassene Namen stehen in `access.yml`.
+- Kick-Nachricht und Server-Beschreibung (MOTD, solange aktiv) stehen in der Config unter `access`.
+
 ## Admin-Panel
 
 `/admin` (Berechtigung `sigmacraft.admin`) öffnet eine Spielerliste. Pro Spieler: IP (inkl. weiterer Accounts mit gleicher IP), Enderchest (nur Ansicht), Ban und Mute mit Dauer (1h, 3h, 12h, 1d, 3d, 7d, 30d, permanent oder eigene Eingabe wie `90m`, `2d`, `1w`) und Grund sowie ein Strafen-Log. Offline-Spieler: `/admin <Name>`. Alle Strafen stehen in `plugins/SigmaCraftCore/punishments.yml`.

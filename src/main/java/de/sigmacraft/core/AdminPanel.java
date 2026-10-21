@@ -4,6 +4,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -16,17 +17,26 @@ import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -34,6 +44,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Ingame-Admin-Panel: /admin öffnet eine Spielerliste mit IP, Enderchest, Ban, Mute und Strafen-Log. */
 final class AdminPanel implements Listener {
@@ -50,7 +62,12 @@ final class AdminPanel implements Listener {
 
     private final SigmaCraftCore plugin;
     private final PunishmentManager punishments;
+    private static final Pattern UUID_FILE = Pattern.compile("^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\\.(dat|dat_old|json)$");
+    private static final Set<String> SKIP_DIRS = Set.of("region", "entities", "poi", "DIM-1", "DIM1", "datapacks", "generated");
     private final Map<UUID, Prompt> prompts = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> loginLocks = new ConcurrentHashMap<>();
+    private final Set<UUID> frozen = new HashSet<>();
+    private volatile long globalLock = 0L;
 
     /** Wartet auf eine Chat-Eingabe des Admins (Dauer und/oder Grund). */
     private static final class Prompt {
@@ -74,6 +91,8 @@ final class AdminPanel implements Listener {
         final boolean ban;
         final int page;
         final List<UUID> ids = new ArrayList<>();
+        String category;
+        boolean armed;
         Inventory inv;
 
         PanelHolder(String view, UUID target, String name, boolean ban, int page) {
@@ -173,32 +192,109 @@ final class AdminPanel implements Listener {
             holder.ids.add(target.getUniqueId());
         }
         if (current > 0) inv.setItem(45, item(Material.ARROW, "&eVorherige Seite"));
+        inv.setItem(46, dimensionItem("nether"));
+        inv.setItem(47, dimensionItem("end"));
+        inv.setItem(48, item(Material.TNT, "&4Daten löschen (ALLE Spieler)", "&7Stats, Achievements, Inventar ...", "&cMit Bestätigung"));
         inv.setItem(49, item(Material.PAPER, "&7Offline-Spieler", "&8Nutze &f/admin <Name>"));
+        boolean restricted = plugin.access().isRestricted();
+        inv.setItem(50, item(restricted ? Material.IRON_DOOR : Material.OAK_DOOR,
+                restricted ? "&cVorab-Zugang: AKTIV" : "&aVorab-Zugang: AUS (Server offen)",
+                "&7Nur zugelassene Spieler dürfen joinen,", "&7auch wenn andere gewhitelisted sind.",
+                "&7Zugelassen: &f" + plugin.access().count(), "&8Klicken zum Umschalten"));
         if (current < pages - 1) inv.setItem(53, item(Material.ARROW, "&eNächste Seite"));
         admin.openInventory(inv);
+    }
+
+    private ItemStack dimensionItem(String which) {
+        boolean disabled = plugin.isDimensionDisabled(which);
+        String label = which.equals("nether") ? "Nether" : "End";
+        return item(which.equals("nether") ? Material.NETHERRACK : Material.END_STONE,
+                (disabled ? "&c" : "&a") + label + ": " + (disabled ? "DEAKTIVIERT" : "aktiv"),
+                "&7Klicken zum Umschalten", "&8Admins sind ausgenommen");
     }
 
     private void openPlayer(Player admin, UUID id) {
         String name = plugin.nameOf(id);
         PanelHolder holder = new PanelHolder("player", id, name, false, 0);
-        Inventory inv = create(holder, 27, "&8Spieler: &f" + name);
+        Inventory inv = create(holder, 36, "&8Spieler: &f" + name);
         PunishmentManager.Active ban = punishments.getBan(id);
         PunishmentManager.Active mute = punishments.getMute(id);
         Player online = Bukkit.getPlayer(id);
+        String onlineOnly = "&cNur für Online-Spieler";
 
         inv.setItem(4, item(Material.PLAYER_HEAD, "&f" + name, online != null ? "&aOnline" : "&7Offline"));
         inv.setItem(10, item(Material.NAME_TAG, "&bIP-Adresse", "&7Klicken, um die IP im Chat zu sehen"));
-        inv.setItem(12, online != null
-                ? item(Material.ENDER_CHEST, "&5Enderchest ansehen", "&7Nur Ansicht, nichts veränderbar")
-                : item(Material.ENDER_CHEST, "&5Enderchest ansehen", "&cNur für Online-Spieler"));
+        inv.setItem(11, item(Material.CHEST, "&6Inventar ansehen", online != null ? "&7Nur Ansicht, nichts veränderbar" : onlineOnly));
+        inv.setItem(12, item(Material.ENDER_CHEST, "&5Enderchest ansehen", online != null ? "&7Nur Ansicht, nichts veränderbar" : onlineOnly));
         inv.setItem(14, ban == null
                 ? item(Material.BARRIER, "&cBannen", "&7Dauer und Grund wählen")
                 : item(Material.EMERALD, "&aEntbannen", "&7Grund: &f" + ban.reason(), "&7Verbleibend: &f" + PunishmentManager.remaining(ban)));
         inv.setItem(16, mute == null
                 ? item(Material.NOTE_BLOCK, "&6Stumm schalten", "&7Dauer und Grund wählen")
                 : item(Material.LIME_DYE, "&aEntmuten", "&7Grund: &f" + mute.reason(), "&7Verbleibend: &f" + PunishmentManager.remaining(mute)));
-        inv.setItem(22, item(Material.BOOK, "&eStrafen-Log", "&7Erhaltene Strafen: &f" + punishments.history(id).size()));
+        inv.setItem(19, item(Material.ENDER_PEARL, "&dZu Spieler teleportieren", online != null ? "&7Du wirst zu ihm gebracht" : onlineOnly));
+        inv.setItem(20, item(Material.LEAD, "&dSpieler zu mir holen", online != null ? "&7Er wird zu dir gebracht" : onlineOnly));
+        boolean isFrozen = frozen.contains(id);
+        inv.setItem(21, isFrozen
+                ? item(Material.CAMPFIRE, "&6Auftauen", "&7Spieler kann sich wieder bewegen")
+                : item(Material.ICE, "&bEinfrieren", online != null ? "&7Spieler kann sich nicht mehr bewegen" : onlineOnly));
+        boolean listed = plugin.access().isAllowed(name);
+        inv.setItem(22, item(listed ? Material.WRITABLE_BOOK : Material.BOOK, listed ? "&aVorab-Zugang: erlaubt" : "&7Vorab-Zugang: nicht erlaubt",
+                "&7Klicken zum " + (listed ? "Entziehen" : "Erlauben")));
+        inv.setItem(23, item(Material.BOOK, "&eStrafen-Log", "&7Erhaltene Strafen: &f" + punishments.history(id).size()));
+        inv.setItem(25, item(Material.TNT, "&4Daten löschen", "&7Stats, Achievements, Inventar ...", "&cMit Bestätigung"));
+        inv.setItem(27, item(Material.ARROW, "&eZurück"));
+        admin.openInventory(inv);
+    }
+
+    private void openInv(Player admin, UUID id) {
+        Player target = Bukkit.getPlayer(id);
+        if (target == null) { msg(admin, PRE + "&cDas Inventar ist nur für Online-Spieler verfügbar."); return; }
+        PanelHolder holder = new PanelHolder("inv", id, target.getName(), false, 0);
+        Inventory inv = create(holder, 54, "&6Inventar: &f" + target.getName());
+        PlayerInventory pi = target.getInventory();
+        ItemStack[] storage = pi.getStorageContents();
+        for (int i = 9; i < 36 && i < storage.length; i++) if (storage[i] != null) inv.setItem(i - 9, storage[i].clone());
+        for (int i = 0; i < 9 && i < storage.length; i++) if (storage[i] != null) inv.setItem(27 + i, storage[i].clone());
+        if (pi.getHelmet() != null) inv.setItem(45, pi.getHelmet().clone());
+        if (pi.getChestplate() != null) inv.setItem(46, pi.getChestplate().clone());
+        if (pi.getLeggings() != null) inv.setItem(47, pi.getLeggings().clone());
+        if (pi.getBoots() != null) inv.setItem(48, pi.getBoots().clone());
+        if (pi.getItemInOffHand().getType() != Material.AIR) inv.setItem(50, pi.getItemInOffHand().clone());
+        inv.setItem(53, item(Material.ARROW, "&eZurück"));
+        admin.openInventory(inv);
+    }
+
+    private String categoryName(String category) {
+        return switch (category) {
+            case "stats" -> "Statistiken";
+            case "ach" -> "Achievements";
+            case "inv" -> "Inventar & Spielerdaten";
+            default -> "ALLE Daten";
+        };
+    }
+
+    private void openClear(Player admin, UUID target, String name) {
+        PanelHolder holder = new PanelHolder("clear", target, name, false, 0);
+        Inventory inv = create(holder, 27, "&4Daten löschen: &f" + (target == null ? "ALLE Spieler" : name));
+        inv.setItem(10, item(Material.PAPER, "&eStatistiken", "&7Kills, Tode, Blöcke, Diamanten, Spielzeit", "&7und Vanilla-Statistiken"));
+        inv.setItem(12, item(Material.NETHER_STAR, "&eAchievements", "&7Alle Fortschritte (Advancements)"));
+        inv.setItem(14, item(Material.CHEST, "&eInventar & Spielerdaten", "&7Inventar, Enderchest, XP, Position"));
+        inv.setItem(16, item(Material.TNT, "&4ALLES", "&7Statistiken, Achievements und Spielerdaten"));
         inv.setItem(18, item(Material.ARROW, "&eZurück"));
+        admin.openInventory(inv);
+    }
+
+    private void openConfirm(Player admin, UUID target, String name, String category) {
+        PanelHolder holder = new PanelHolder("confirm", target, name, false, 0);
+        holder.category = category;
+        Inventory inv = create(holder, 27, "&4Bestätigen: &f" + categoryName(category));
+        inv.setItem(11, item(Material.LIME_CONCRETE, "&a&lBESTÄTIGEN", target == null ? "&cBetrifft ALLE Spieler!" : "&7Spieler: &f" + name));
+        inv.setItem(13, item(Material.TNT, "&c" + categoryName(category),
+                "&7Ziel: &f" + (target == null ? "ALLE Spieler, die je auf dem Server waren" : name),
+                "&7Online-Spieler werden gekickt" + (target == null ? " (auch du)" : ""),
+                "&4Nicht rückgängig zu machen!"));
+        inv.setItem(15, item(Material.RED_CONCRETE, "&c&lABBRECHEN"));
         admin.openInventory(inv);
     }
 
@@ -249,11 +345,12 @@ final class AdminPanel implements Listener {
         Player target = Bukkit.getPlayer(id);
         if (target == null) { msg(admin, PRE + "&cDie Enderchest ist nur für Online-Spieler verfügbar."); return; }
         PanelHolder holder = new PanelHolder("ender", id, target.getName(), false, 0);
-        Inventory inv = create(holder, 27, "&5Enderchest: &f" + target.getName());
+        Inventory inv = create(holder, 36, "&5Enderchest: &f" + target.getName());
         ItemStack[] contents = target.getEnderChest().getContents();
         for (int i = 0; i < 27 && i < contents.length; i++) {
             if (contents[i] != null) inv.setItem(i, contents[i].clone());
         }
+        inv.setItem(35, item(Material.ARROW, "&eZurück"));
         admin.openInventory(inv);
     }
 
@@ -282,6 +379,10 @@ final class AdminPanel implements Listener {
             case "player" -> clickPlayer(admin, holder, slot);
             case "duration" -> clickDuration(admin, holder, slot);
             case "log" -> { if (slot == 49) later(() -> openPlayer(admin, holder.target)); }
+            case "inv" -> { if (slot == 53) later(() -> openPlayer(admin, holder.target)); }
+            case "ender" -> { if (slot == 35) later(() -> openPlayer(admin, holder.target)); }
+            case "clear" -> clickClear(admin, holder, slot);
+            case "confirm" -> clickConfirm(admin, holder, slot);
             default -> { }
         }
     }
@@ -295,6 +396,22 @@ final class AdminPanel implements Listener {
         if (slot >= 0 && slot < 45 && slot < holder.ids.size()) {
             UUID id = holder.ids.get(slot);
             later(() -> openPlayer(admin, id));
+        } else if (slot == 46 || slot == 47) {
+            String which = slot == 46 ? "nether" : "end";
+            later(() -> {
+                boolean disabled = plugin.toggleDimension(which);
+                msg(admin, PRE + "&7" + (which.equals("nether") ? "Nether" : "End") + " ist jetzt " + (disabled ? "&cdeaktiviert" : "&aaktiv") + "&7.");
+                openList(admin, holder.page);
+            });
+        } else if (slot == 50) {
+            later(() -> {
+                boolean on = !plugin.access().isRestricted();
+                plugin.access().setRestricted(on);
+                msg(admin, PRE + (on ? "&cVorab-Zugang aktiv." : "&aServer freigegeben."));
+                openList(admin, holder.page);
+            });
+        } else if (slot == 48) {
+            later(() -> openClear(admin, null, null));
         } else if (slot == 45 && holder.page > 0) {
             later(() -> openList(admin, holder.page - 1));
         } else if (slot == 53) {
@@ -306,6 +423,7 @@ final class AdminPanel implements Listener {
         UUID id = holder.target;
         switch (slot) {
             case 10 -> later(() -> { admin.closeInventory(); showIp(admin, id); });
+            case 11 -> later(() -> openInv(admin, id));
             case 12 -> later(() -> openEnder(admin, id));
             case 14 -> later(() -> {
                 if (punishments.getBan(id) != null) {
@@ -331,10 +449,150 @@ final class AdminPanel implements Listener {
                     openDuration(admin, id, holder.name, false);
                 }
             });
-            case 22 -> later(() -> openLog(admin, id));
-            case 18 -> later(() -> openList(admin, 0));
+            case 19 -> later(() -> {
+                Player t = Bukkit.getPlayer(id);
+                if (t == null) { msg(admin, PRE + "&cSpieler ist nicht online."); return; }
+                admin.closeInventory();
+                admin.teleport(t.getLocation());
+                msg(admin, PRE + "&7Du wurdest zu &f" + t.getName() + " &7teleportiert.");
+            });
+            case 20 -> later(() -> {
+                Player t = Bukkit.getPlayer(id);
+                if (t == null) { msg(admin, PRE + "&cSpieler ist nicht online."); return; }
+                admin.closeInventory();
+                t.teleport(admin.getLocation());
+                msg(admin, PRE + "&f" + t.getName() + " &7wurde zu dir geholt.");
+            });
+            case 21 -> later(() -> {
+                Player t = Bukkit.getPlayer(id);
+                if (frozen.contains(id)) {
+                    frozen.remove(id);
+                    if (t != null) msg(t, "&aDu wurdest aufgetaut.");
+                    msg(admin, PRE + "&f" + holder.name + " &7ist nicht mehr eingefroren.");
+                } else if (t == null) {
+                    msg(admin, PRE + "&cSpieler ist nicht online.");
+                } else if (canPunish(admin, id)) {
+                    frozen.add(id);
+                    msg(t, "&bDu wurdest von einem Admin eingefroren.");
+                    msg(admin, PRE + "&f" + holder.name + " &7wurde eingefroren.");
+                }
+                openPlayer(admin, id);
+            });
+            case 22 -> later(() -> {
+                if (plugin.access().isAllowed(holder.name)) {
+                    plugin.access().remove(holder.name);
+                    msg(admin, PRE + "&f" + holder.name + " &7hat keinen Vorab-Zugang mehr.");
+                } else {
+                    plugin.access().add(holder.name);
+                    msg(admin, PRE + "&f" + holder.name + " &7hat jetzt Vorab-Zugang.");
+                }
+                openPlayer(admin, id);
+            });
+            case 23 -> later(() -> openLog(admin, id));
+            case 25 -> later(() -> openClear(admin, id, holder.name));
+            case 27 -> later(() -> openList(admin, 0));
             default -> { }
         }
+    }
+
+    private void clickClear(Player admin, PanelHolder holder, int slot) {
+        String category = switch (slot) { case 10 -> "stats"; case 12 -> "ach"; case 14 -> "inv"; case 16 -> "all"; default -> null; };
+        if (category != null) {
+            later(() -> openConfirm(admin, holder.target, holder.name, category));
+        } else if (slot == 18) {
+            later(() -> { if (holder.target == null) openList(admin, 0); else openPlayer(admin, holder.target); });
+        }
+    }
+
+    private void clickConfirm(Player admin, PanelHolder holder, int slot) {
+        if (slot == 11) {
+            later(() -> {
+                // Beim Löschen für ALLE Spieler muss zweimal geklickt werden.
+                if (holder.target == null && !holder.armed) {
+                    holder.armed = true;
+                    holder.inv.setItem(11, item(Material.REDSTONE_BLOCK, "&4&lWIRKLICH ALLE LÖSCHEN?", "&cNochmal klicken zum Ausführen"));
+                    return;
+                }
+                executeClear(admin, holder.target, holder.name, holder.category);
+            });
+        } else if (slot == 15) {
+            later(() -> openClear(admin, holder.target, holder.name));
+        }
+    }
+
+    // ---------- Daten löschen ----------
+
+    private void executeClear(Player admin, UUID target, String name, String category) {
+        boolean stats = category.equals("stats") || category.equals("all");
+        boolean ach = category.equals("ach") || category.equals("all");
+        boolean inv = category.equals("inv") || category.equals("all");
+        String scope = target == null ? "ALLE Spieler" : name;
+        UUID adminId = admin.getUniqueId();
+        admin.closeInventory();
+        msg(admin, PRE + "&7Lösche &f" + categoryName(category) + " &7für &f" + scope + "&7 ...");
+        plugin.getLogger().warning("Admin " + admin.getName() + " löscht '" + categoryName(category) + "' für " + scope);
+
+        // Betroffene Spieler kicken und kurz sperren, damit ihre Dateien nicht beim Speichern neu geschrieben werden.
+        Component kick = LEGACY.deserialize("&c&lDeine Daten wurden zurückgesetzt\n\n&7Bitte verbinde dich in einigen Sekunden neu.");
+        long lockUntil = System.currentTimeMillis() + 10_000L;
+        if (target == null) {
+            globalLock = lockUntil;
+            for (Player p : new ArrayList<>(Bukkit.getOnlinePlayers())) p.kick(kick);
+        } else {
+            loginLocks.put(target, lockUntil);
+            Player t = Bukkit.getPlayer(target);
+            if (t != null) t.kick(kick);
+        }
+
+        Bukkit.getScheduler().runTaskLater(plugin, () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            int deleted = deleteFiles(target, stats, ach, inv);
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (stats) plugin.clearOurStats(target);
+                plugin.getLogger().warning("Datenlöschung abgeschlossen: " + categoryName(category) + " für " + scope + " (" + deleted + " Dateien).");
+                Player a = Bukkit.getPlayer(adminId);
+                if (a != null) msg(a, PRE + "&aFertig. &7" + deleted + " Dateien gelöscht, Stats zurückgesetzt.");
+            });
+        }), 40L);
+    }
+
+    /** Löscht Spielerdateien (Stats, Advancements, Spielerdaten) in der Haupt-Welt. Läuft asynchron. */
+    private int deleteFiles(UUID only, boolean stats, boolean ach, boolean inv) {
+        int[] count = {0};
+        Path root = Bukkit.getWorlds().get(0).getWorldFolder().toPath();
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    Path name = dir.getFileName();
+                    return name != null && SKIP_DIRS.contains(name.toString()) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    String fileName = file.getFileName().toString();
+                    Matcher m = UUID_FILE.matcher(fileName);
+                    if (!m.matches()) return FileVisitResult.CONTINUE;
+                    UUID id;
+                    try { id = UUID.fromString(m.group(1)); } catch (IllegalArgumentException e) { return FileVisitResult.CONTINUE; }
+                    if (only != null && !only.equals(id)) return FileVisitResult.CONTINUE;
+                    String rel = "/" + root.relativize(file).toString().replace('\\', '/').toLowerCase(Locale.ROOT);
+                    boolean isAdvancement = rel.contains("/advancements/");
+                    boolean isStats = rel.contains("/stats/");
+                    boolean isPlayerData = (fileName.endsWith(".dat") || fileName.endsWith(".dat_old"))
+                            && (rel.contains("/playerdata/") || rel.contains("/players/")) && !isAdvancement && !isStats;
+                    if ((ach && isAdvancement) || (stats && isStats) || (inv && isPlayerData)) {
+                        try { Files.delete(file); count[0]++; } catch (IOException ignored) { }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) { return FileVisitResult.CONTINUE; }
+            });
+        } catch (IOException e) {
+            plugin.getLogger().warning("Fehler beim Löschen der Spielerdateien: " + e.getMessage());
+        }
+        return count[0];
     }
 
     private boolean canPunish(Player admin, UUID target) {
@@ -420,8 +678,21 @@ final class AdminPanel implements Listener {
 
     @EventHandler
     public void onPreLogin(AsyncPlayerPreLoginEvent e) {
+        long now = System.currentTimeMillis();
+        if (now < globalLock || now < loginLocks.getOrDefault(e.getUniqueId(), 0L)) {
+            e.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
+                    LEGACY.deserialize("&eDaten werden gerade zurückgesetzt.\n&7Bitte versuche es in einigen Sekunden erneut."));
+            return;
+        }
         PunishmentManager.Active ban = punishments.getBan(e.getUniqueId());
         if (ban != null) e.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, banScreen(ban));
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onFrozenMove(PlayerMoveEvent e) {
+        if (!frozen.contains(e.getPlayer().getUniqueId()) || e.getTo() == null) return;
+        Location from = e.getFrom(), to = e.getTo();
+        if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) e.setCancelled(true);
     }
 
     @EventHandler
@@ -434,6 +705,7 @@ final class AdminPanel implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         prompts.remove(e.getPlayer().getUniqueId());
+        frozen.remove(e.getPlayer().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)

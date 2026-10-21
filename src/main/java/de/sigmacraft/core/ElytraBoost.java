@@ -113,7 +113,7 @@ public final class ElytraBoost implements Listener {
         }
     }
 
-    @EventHandler
+    @EventHandler(ignoreCancelled = true)
     public void onDamage(EntityDamageEvent e) {
         if (e.getEntity() instanceof Player p && active.containsKey(p.getUniqueId())
                 && p.getHealth() - e.getFinalDamage() <= 0) {
