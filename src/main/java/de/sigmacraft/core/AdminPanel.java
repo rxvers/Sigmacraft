@@ -5,6 +5,9 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.advancement.Advancement;
+import org.bukkit.advancement.AdvancementProgress;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -26,7 +29,9 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +41,9 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -63,7 +70,7 @@ final class AdminPanel implements Listener {
     private final SigmaCraftCore plugin;
     private final PunishmentManager punishments;
     private static final Pattern UUID_FILE = Pattern.compile("^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\\.(dat|dat_old|json)$");
-    private static final Set<String> SKIP_DIRS = Set.of("region", "entities", "poi", "DIM-1", "DIM1", "datapacks", "generated");
+    private static final Set<String> SKIP_DIRS = Set.of("region", "entities", "poi", "DIM-1", "DIM1", "datapacks", "generated", "plugins", "logs", "libraries", "cache", "versions", "crash-reports", ".paper-remap", "mods");
     private final Map<UUID, Prompt> prompts = new ConcurrentHashMap<>();
     private final Map<UUID, Long> loginLocks = new ConcurrentHashMap<>();
     private final Set<UUID> frozen = new HashSet<>();
@@ -110,6 +117,30 @@ final class AdminPanel implements Listener {
     AdminPanel(SigmaCraftCore plugin, PunishmentManager punishments) {
         this.plugin = plugin;
         this.punishments = punishments;
+        loadFrozen();
+    }
+
+    // ---------- Einfrieren bleibt über Logout/Login und Neustarts bestehen ----------
+
+    private File frozenFile() { return new File(plugin.getDataFolder(), "frozen.yml"); }
+
+    private void loadFrozen() {
+        for (String raw : YamlConfiguration.loadConfiguration(frozenFile()).getStringList("frozen")) {
+            try { frozen.add(UUID.fromString(raw)); } catch (IllegalArgumentException ignored) { }
+        }
+    }
+
+    private void saveFrozen() {
+        YamlConfiguration y = new YamlConfiguration();
+        List<String> list = new ArrayList<>();
+        for (UUID id : frozen) list.add(id.toString());
+        y.set("frozen", list);
+        try {
+            plugin.getDataFolder().mkdirs();
+            y.save(frozenFile());
+        } catch (IOException ex) {
+            plugin.getLogger().warning("frozen.yml konnte nicht gespeichert werden: " + ex.getMessage());
+        }
     }
 
     // ---------- Hilfen ----------
@@ -467,12 +498,14 @@ final class AdminPanel implements Listener {
                 Player t = Bukkit.getPlayer(id);
                 if (frozen.contains(id)) {
                     frozen.remove(id);
+                    saveFrozen();
                     if (t != null) msg(t, "&aDu wurdest aufgetaut.");
                     msg(admin, PRE + "&f" + holder.name + " &7ist nicht mehr eingefroren.");
                 } else if (t == null) {
                     msg(admin, PRE + "&cSpieler ist nicht online.");
                 } else if (canPunish(admin, id)) {
                     frozen.add(id);
+                    saveFrozen();
                     msg(t, "&bDu wurdest von einem Admin eingefroren.");
                     msg(admin, PRE + "&f" + holder.name + " &7wurde eingefroren.");
                 }
@@ -522,6 +555,26 @@ final class AdminPanel implements Listener {
 
     // ---------- Daten löschen ----------
 
+    /** Setzt für Online-Spieler Inventar, Enderchest, XP und Advancements direkt über die API zurück. */
+    private void clearOnline(Player p, boolean ach, boolean inv) {
+        if (inv) {
+            p.getInventory().clear();
+            p.getInventory().setArmorContents(new ItemStack[4]);
+            p.getInventory().setItemInOffHand(new ItemStack(Material.AIR));
+            p.getEnderChest().clear();
+            p.setItemOnCursor(new ItemStack(Material.AIR));
+            p.setLevel(0);
+            p.setExp(0f);
+        }
+        if (ach) {
+            Iterator<Advancement> it = Bukkit.advancementIterator();
+            while (it.hasNext()) {
+                AdvancementProgress progress = p.getAdvancementProgress(it.next());
+                for (String criteria : new ArrayList<>(progress.getAwardedCriteria())) progress.revokeCriteria(criteria);
+            }
+        }
+    }
+
     private void executeClear(Player admin, UUID target, String name, String category) {
         boolean stats = category.equals("stats") || category.equals("all");
         boolean ach = category.equals("ach") || category.equals("all");
@@ -532,39 +585,59 @@ final class AdminPanel implements Listener {
         msg(admin, PRE + "&7Lösche &f" + categoryName(category) + " &7für &f" + scope + "&7 ...");
         plugin.getLogger().warning("Admin " + admin.getName() + " löscht '" + categoryName(category) + "' für " + scope);
 
-        // Betroffene Spieler kicken und kurz sperren, damit ihre Dateien nicht beim Speichern neu geschrieben werden.
+        // 1) Online-Spieler: direkt per API zurücksetzen, dann kicken und kurz sperren.
         Component kick = LEGACY.deserialize("&c&lDeine Daten wurden zurückgesetzt\n\n&7Bitte verbinde dich in einigen Sekunden neu.");
         long lockUntil = System.currentTimeMillis() + 10_000L;
         if (target == null) {
             globalLock = lockUntil;
-            for (Player p : new ArrayList<>(Bukkit.getOnlinePlayers())) p.kick(kick);
+            for (Player p : new ArrayList<>(Bukkit.getOnlinePlayers())) {
+                clearOnline(p, ach, inv);
+                p.kick(kick);
+            }
         } else {
             loginLocks.put(target, lockUntil);
             Player t = Bukkit.getPlayer(target);
-            if (t != null) t.kick(kick);
+            if (t != null) {
+                clearOnline(t, ach, inv);
+                t.kick(kick);
+            }
         }
 
+        // 2) Dateien von Offline-Spielern (und Vanilla-Statistiken) nach kurzer Wartezeit löschen.
         Bukkit.getScheduler().runTaskLater(plugin, () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            int deleted = deleteFiles(target, stats, ach, inv);
+            int[] deleted = deleteFiles(target, stats, ach, inv);
             Bukkit.getScheduler().runTask(plugin, () -> {
                 if (stats) plugin.clearOurStats(target);
-                plugin.getLogger().warning("Datenlöschung abgeschlossen: " + categoryName(category) + " für " + scope + " (" + deleted + " Dateien).");
+                String result = "Stats-Dateien " + deleted[0] + ", Achievements " + deleted[1] + ", Spielerdaten " + deleted[2];
+                plugin.getLogger().warning("Datenlöschung abgeschlossen für " + scope + ": " + result
+                        + " (durchsucht: " + Bukkit.getWorldContainer().getAbsolutePath() + ")");
                 Player a = Bukkit.getPlayer(adminId);
-                if (a != null) msg(a, PRE + "&aFertig. &7" + deleted + " Dateien gelöscht, Stats zurückgesetzt.");
+                if (a != null) {
+                    msg(a, PRE + "&aFertig. &7Gelöscht: &f" + result);
+                    if (deleted[0] + deleted[1] + deleted[2] == 0 && (ach || inv)) {
+                        msg(a, PRE + "&eHinweis: &7Keine Dateien gefunden. Online-Spieler wurden direkt zurückgesetzt, Offline-Spieler ggf. nicht.");
+                    }
+                }
             });
         }), 40L);
     }
 
-    /** Löscht Spielerdateien (Stats, Advancements, Spielerdaten) in der Haupt-Welt. Läuft asynchron. */
-    private int deleteFiles(UUID only, boolean stats, boolean ach, boolean inv) {
-        int[] count = {0};
-        Path root = Bukkit.getWorlds().get(0).getWorldFolder().toPath();
+    /**
+     * Löscht Spielerdateien (Vanilla-Stats, Advancements, Spielerdaten) für einen Spieler oder alle.
+     * Durchsucht den gesamten Server-Ordner (bis Tiefe 8), da die Ordnerstruktur je nach Version
+     * unterschiedlich ist (z. B. world/playerdata oder world/players/data). Läuft asynchron.
+     * Rückgabe: {Stats, Achievements, Spielerdaten}.
+     */
+    private int[] deleteFiles(UUID only, boolean stats, boolean ach, boolean inv) {
+        int[] count = {0, 0, 0};
+        Path root = Bukkit.getWorldContainer().toPath().toAbsolutePath().normalize();
         try {
-            Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            Files.walkFileTree(root, EnumSet.noneOf(FileVisitOption.class), 8, new SimpleFileVisitor<Path>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                     Path name = dir.getFileName();
-                    return name != null && SKIP_DIRS.contains(name.toString()) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                    return name != null && !dir.equals(root) && SKIP_DIRS.contains(name.toString())
+                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
                 }
 
                 @Override
@@ -575,13 +648,15 @@ final class AdminPanel implements Listener {
                     UUID id;
                     try { id = UUID.fromString(m.group(1)); } catch (IllegalArgumentException e) { return FileVisitResult.CONTINUE; }
                     if (only != null && !only.equals(id)) return FileVisitResult.CONTINUE;
-                    String rel = "/" + root.relativize(file).toString().replace('\\', '/').toLowerCase(Locale.ROOT);
-                    boolean isAdvancement = rel.contains("/advancements/");
-                    boolean isStats = rel.contains("/stats/");
-                    boolean isPlayerData = (fileName.endsWith(".dat") || fileName.endsWith(".dat_old"))
-                            && (rel.contains("/playerdata/") || rel.contains("/players/")) && !isAdvancement && !isStats;
-                    if ((ach && isAdvancement) || (stats && isStats) || (inv && isPlayerData)) {
-                        try { Files.delete(file); count[0]++; } catch (IOException ignored) { }
+                    String rel = "/" + root.relativize(file.toAbsolutePath().normalize()).toString().replace('\\', '/').toLowerCase(Locale.ROOT);
+                    int type = -1;
+                    if (rel.contains("/advancements/")) type = 1;
+                    else if (rel.contains("/stats/")) type = 0;
+                    else if ((fileName.endsWith(".dat") || fileName.endsWith(".dat_old"))
+                            && (rel.contains("/playerdata/") || rel.contains("/players/"))) type = 2;
+                    if (type < 0) return FileVisitResult.CONTINUE;
+                    if ((type == 0 && stats) || (type == 1 && ach) || (type == 2 && inv)) {
+                        try { Files.delete(file); count[type]++; } catch (IOException ignored) { }
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -592,7 +667,7 @@ final class AdminPanel implements Listener {
         } catch (IOException e) {
             plugin.getLogger().warning("Fehler beim Löschen der Spielerdateien: " + e.getMessage());
         }
-        return count[0];
+        return count;
     }
 
     private boolean canPunish(Player admin, UUID target) {
@@ -700,12 +775,14 @@ final class AdminPanel implements Listener {
         Player p = e.getPlayer();
         String ip = p.getAddress() == null ? null : p.getAddress().getAddress().getHostAddress();
         punishments.recordJoin(p.getUniqueId(), p.getName(), ip);
+        if (frozen.contains(p.getUniqueId())) {
+            Bukkit.getScheduler().runTaskLater(plugin, () -> msg(p, "&bDu bist von einem Admin eingefroren und kannst dich nicht bewegen."), 20L);
+        }
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         prompts.remove(e.getPlayer().getUniqueId());
-        frozen.remove(e.getPlayer().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
