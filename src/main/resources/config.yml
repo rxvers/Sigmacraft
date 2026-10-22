@@ -35,3 +35,12 @@ worlds:
 access:
   kick-message: "&c&lSigmaCraft ist noch nicht eröffnet\n\n&7Der Server ist derzeit nur für ausgewählte Spieler offen.\n&7Schau bald wieder vorbei!"
   motd: "&b&lSigmaCraft &8» &eEröffnung bald!"
+
+pvp:
+  optout-cooldown-minutes: 60
+
+accesslog:
+  enabled: true
+  log-doors: true
+  retention-days: 14
+  max-entries: 50000

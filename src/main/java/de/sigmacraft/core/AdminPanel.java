@@ -216,6 +216,7 @@ final class AdminPanel implements Listener {
             List<Component> lore = new ArrayList<>();
             if (punishments.getBan(target.getUniqueId()) != null) lore.add(text("&cGebannt"));
             if (punishments.getMute(target.getUniqueId()) != null) lore.add(text("&6Stumm"));
+            if (plugin.pvp().isMarked(target.getUniqueId())) lore.add(text("&c● PvP-gekennzeichnet"));
             lore.add(text("&7Klicken für Optionen"));
             meta.lore(lore);
             head.setItemMeta(meta);
@@ -227,6 +228,8 @@ final class AdminPanel implements Listener {
         inv.setItem(47, dimensionItem("end"));
         inv.setItem(48, item(Material.TNT, "&4Daten löschen (ALLE Spieler)", "&7Stats, Achievements, Inventar ...", "&cMit Bestätigung"));
         inv.setItem(49, item(Material.PAPER, "&7Offline-Spieler", "&8Nutze &f/admin <Name>"));
+        inv.setItem(51, item(Material.SPYGLASS, plugin.activity().isInspecting(admin.getUniqueId()) ? "&aInspektor: AN" : "&7Inspektor: AUS",
+                "&7Rechtsklick auf einen Block zeigt,", "&7wer ihn benutzt hat (Anti-Klau).", "&8Klicken zum Umschalten"));
         boolean restricted = plugin.access().isRestricted();
         inv.setItem(50, item(restricted ? Material.IRON_DOOR : Material.OAK_DOOR,
                 restricted ? "&cVorab-Zugang: AKTIV" : "&aVorab-Zugang: AUS (Server offen)",
@@ -257,9 +260,14 @@ final class AdminPanel implements Listener {
         inv.setItem(10, item(Material.NAME_TAG, "&bIP-Adresse", "&7Klicken, um die IP im Chat zu sehen"));
         inv.setItem(11, item(Material.CHEST, "&6Inventar ansehen", online != null ? "&7Nur Ansicht, nichts veränderbar" : onlineOnly));
         inv.setItem(12, item(Material.ENDER_CHEST, "&5Enderchest ansehen", online != null ? "&7Nur Ansicht, nichts veränderbar" : onlineOnly));
+        inv.setItem(13, item(Material.COMPASS, "&bZugriffs-Log", "&7Kisten, Türen, Zerstörtes", "&7Einträge: &f" + plugin.activity().byId(id, 1000).size()));
         inv.setItem(14, ban == null
                 ? item(Material.BARRIER, "&cBannen", "&7Dauer und Grund wählen")
                 : item(Material.EMERALD, "&aEntbannen", "&7Grund: &f" + ban.reason(), "&7Verbleibend: &f" + PunishmentManager.remaining(ban)));
+        boolean pvpOn = plugin.pvp().isMarked(id);
+        inv.setItem(15, pvpOn
+                ? item(Material.IRON_SWORD, "&cPvP-Kennzeichnung: AN", "&7Klicken zum Entfernen", "&8Ohne Wartezeit")
+                : item(Material.SHIELD, "&aPvP-Kennzeichnung: AUS (geschützt)", "&7Klicken zum Setzen", "&8Ohne Bestätigung"));
         inv.setItem(16, mute == null
                 ? item(Material.NOTE_BLOCK, "&6Stumm schalten", "&7Dauer und Grund wählen")
                 : item(Material.LIME_DYE, "&aEntmuten", "&7Grund: &f" + mute.reason(), "&7Verbleibend: &f" + PunishmentManager.remaining(mute)));
@@ -372,6 +380,29 @@ final class AdminPanel implements Listener {
         admin.openInventory(inv);
     }
 
+    private void openActivity(Player admin, UUID id) {
+        String name = plugin.nameOf(id);
+        PanelHolder holder = new PanelHolder("alog", id, name, false, 0);
+        Inventory inv = create(holder, 54, "&bZugriffs-Log: &f" + name);
+        List<ActivityLog.Entry> list = plugin.activity().byId(id, 45);
+        if (list.isEmpty()) inv.setItem(22, item(Material.PAPER, "&7Keine Einträge"));
+        for (int i = 0; i < list.size(); i++) {
+            ActivityLog.Entry en = list.get(i);
+            Material icon = switch (en.kind()) {
+                case "CONTAINER" -> Material.CHEST;
+                case "DOOR" -> Material.OAK_DOOR;
+                default -> Material.BARRIER;
+            };
+            List<String> lore = new ArrayList<>();
+            lore.add("&7" + ActivityLog.action(en) + " &e" + ActivityLog.pretty(en.block()));
+            lore.add("&7Ort: &f" + en.x() + ", " + en.y() + ", " + en.z() + " &8(" + en.world() + ")");
+            if (!en.detail().isEmpty()) lore.add("&7Änderung: " + ActivityLog.colorDetail(en.detail()));
+            inv.setItem(i, item(icon, "&f" + ActivityLog.time(en), lore.toArray(new String[0])));
+        }
+        inv.setItem(49, item(Material.ARROW, "&eZurück"));
+        admin.openInventory(inv);
+    }
+
     private void openEnder(Player admin, UUID id) {
         Player target = Bukkit.getPlayer(id);
         if (target == null) { msg(admin, PRE + "&cDie Enderchest ist nur für Online-Spieler verfügbar."); return; }
@@ -410,6 +441,7 @@ final class AdminPanel implements Listener {
             case "player" -> clickPlayer(admin, holder, slot);
             case "duration" -> clickDuration(admin, holder, slot);
             case "log" -> { if (slot == 49) later(() -> openPlayer(admin, holder.target)); }
+            case "alog" -> { if (slot == 49) later(() -> openPlayer(admin, holder.target)); }
             case "inv" -> { if (slot == 53) later(() -> openPlayer(admin, holder.target)); }
             case "ender" -> { if (slot == 35) later(() -> openPlayer(admin, holder.target)); }
             case "clear" -> clickClear(admin, holder, slot);
@@ -433,6 +465,11 @@ final class AdminPanel implements Listener {
                 boolean disabled = plugin.toggleDimension(which);
                 msg(admin, PRE + "&7" + (which.equals("nether") ? "Nether" : "End") + " ist jetzt " + (disabled ? "&cdeaktiviert" : "&aaktiv") + "&7.");
                 openList(admin, holder.page);
+            });
+        } else if (slot == 51) {
+            later(() -> {
+                plugin.activity().toggleInspect(admin);
+                admin.closeInventory();
             });
         } else if (slot == 50) {
             later(() -> {
@@ -466,6 +503,13 @@ final class AdminPanel implements Listener {
                 } else {
                     openDuration(admin, id, holder.name, true);
                 }
+            });
+            case 13 -> later(() -> openActivity(admin, id));
+            case 15 -> later(() -> {
+                boolean on = !plugin.pvp().isMarked(id);
+                plugin.pvp().setMarked(id, on);
+                msg(admin, PRE + "&f" + holder.name + " &7ist jetzt " + (on ? "&c● PvP-gekennzeichnet" : "&a● geschützt") + "&7.");
+                openPlayer(admin, id);
             });
             case 16 -> later(() -> {
                 if (punishments.getMute(id) != null) {

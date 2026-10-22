@@ -80,6 +80,8 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     private PunishmentManager punishments;
     private AdminPanel adminPanel;
     private AccessControl accessControl;
+    private PvpManager pvpManager;
+    private ActivityLog activityLog;
 
     @Override
     public void onEnable() {
@@ -92,11 +94,15 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         punishments = new PunishmentManager(new File(getDataFolder(), "punishments.yml"));
         adminPanel = new AdminPanel(this, punishments);
         accessControl = new AccessControl(this);
+        pvpManager = new PvpManager(this);
+        activityLog = new ActivityLog(this);
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getPluginManager().registerEvents(elytraBoost, this);
         Bukkit.getPluginManager().registerEvents(adminPanel, this);
         Bukkit.getPluginManager().registerEvents(accessControl, this);
-        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard", "admin", "access")) {
+        Bukkit.getPluginManager().registerEvents(pvpManager, this);
+        Bukkit.getPluginManager().registerEvents(activityLog, this);
+        for (String name : List.of("spawn", "scstats", "sigmacraft", "team", "sctop", "stat", "leaderboard", "admin", "access", "pvp", "regeln", "zugriffe")) {
             PluginCommand cmd = getCommand(name);
             if (cmd == null) continue;
             cmd.setExecutor(this);
@@ -407,7 +413,9 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         String icon = badges.isEmpty() ? chatIcon(player.getUniqueId()) : badges;
         // Keep the vanilla chat format and add only small symbols, no rank titles.
         String prefix = teams == null ? "" : teams.prefix(player.getUniqueId());
-        event.setFormat(prefix + "%s " + icon + ChatColor.RESET + ": %s");
+        boolean marked = pvpManager != null && pvpManager.isMarked(player.getUniqueId());
+        String dot = (marked ? ChatColor.RED : ChatColor.GREEN) + "● " + ChatColor.RESET;
+        event.setFormat(dot + prefix + "%s " + icon + ChatColor.RESET + ": %s");
     }
 
     @Override
@@ -496,6 +504,9 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         }
         if (command.getName().equalsIgnoreCase("admin")) return adminPanel.command(sender, args);
         if (command.getName().equalsIgnoreCase("access")) return accessControl.command(sender, args);
+        if (command.getName().equalsIgnoreCase("pvp")) return pvpManager.command(sender, args);
+        if (command.getName().equalsIgnoreCase("zugriffe")) return activityLog.command(sender, args);
+        if (command.getName().equalsIgnoreCase("regeln")) { pvpManager.sendRules(sender); return true; }
         if (command.getName().equalsIgnoreCase("stat")) return handleStat(sender, args);
         if (command.getName().equalsIgnoreCase("leaderboard")) return handleLeaderboard(sender, args);
         if (command.getName().equalsIgnoreCase("sigmacraft")) {
@@ -588,13 +599,20 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         lastTabUpdate.put(id, System.currentTimeMillis());
         String prefix = teams == null ? "" : teams.prefix(id);
         String badges = topBadges(id);
-        player.playerListName(SECTION.deserialize(prefix + ChatColor.WHITE + player.getName() + (badges.isEmpty() ? "" : " " + badges)));
+        boolean pvp = pvpManager != null && pvpManager.isMarked(id);
+        String dot = (pvp ? ChatColor.RED : ChatColor.GREEN) + "● " + ChatColor.RESET;
+        player.playerListName(SECTION.deserialize(dot + prefix + ChatColor.WHITE + player.getName() + (badges.isEmpty() ? "" : " " + badges)));
+        int pvpOnline = 0;
+        for (Player online : Bukkit.getOnlinePlayers()) if (pvpManager != null && pvpManager.isMarked(online.getUniqueId())) pvpOnline++;
+        int safeOnline = Bukkit.getOnlinePlayers().size() - pvpOnline;
 
         String team = teams == null ? "" : teams.teamOf(id);
         String teamText = team.isEmpty() ? "-" : Integer.toString(teams.onlineCount(team));
         Component header = MM.deserialize("<newline><gradient:#55ffff:#5555ff><bold>SIGMACRAFT</bold></gradient><newline>"
                 + "<gray>sigmacraft.minecraftserver.de</gray><newline>"
-                + "<dark_gray>Online</dark_gray> <white>" + Bukkit.getOnlinePlayers().size() + "</white><newline>");
+                + "<dark_gray>Online</dark_gray> <white>" + Bukkit.getOnlinePlayers().size() + "</white> <dark_gray>|</dark_gray> "
+                + "<red>●</red> <gray>PvP</gray> <white>" + pvpOnline + "</white> <dark_gray>|</dark_gray> "
+                + "<green>●</green> <gray>Geschützt</gray> <white>" + safeOnline + "</white><newline>");
         Component footer = MM.deserialize("<newline>"
                 + "<red>Tode</red> <white>" + get(id, "deaths") + "</white> <dark_gray>|</dark_gray> "
                 + "<green>Kills</green> <white>" + get(id, "kills") + "</white> <dark_gray>|</dark_gray> "
@@ -739,6 +757,12 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
 
     AccessControl access() { return accessControl; }
 
+    PvpManager pvp() { return pvpManager; }
+
+    ActivityLog activity() { return activityLog; }
+
+    void refreshTabs() { refreshAllTabs(); }
+
     UUID resolveId(String name, boolean allowOfflineLookup) {
         Player online = Bukkit.getPlayerExact(name);
         if (online != null) return online.getUniqueId();
@@ -868,6 +892,11 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
                 if (args.length == 1) options.addAll(List.of("create", "remove", "clean"));
                 else if (args.length == 2 && first.equals("create")) options.addAll(METRICS);
             }
+            case "zugriffe" -> {
+                if (args.length == 1) options.addAll(List.of("inspect", "near", "player", "help"));
+                else if (args.length == 2 && first.equals("player")) options.addAll(onlineNames());
+            }
+            case "pvp" -> { if (args.length == 1) options.addAll(List.of("on", "bestätigen", "off", "status", "list")); }
             case "access" -> {
                 if (args.length == 1) options.addAll(List.of("on", "off", "status", "add", "remove", "list"));
                 else if (args.length == 2 && first.equals("add")) options.addAll(onlineNames());

@@ -27,6 +27,19 @@ commands:
     description: Vorab-Zugang vor der Eröffnung verwalten.
     usage: /access <on|off|status|add|remove|list>
     permission: sigmacraft.admin
+  zugriffe:
+    description: Anti-Klau-Log (Behälter, Türen) mit Inspektor.
+    usage: /zugriffe <inspect|near|player>
+    aliases: [zlog, log]
+    permission: sigmacraft.admin
+  pvp:
+    description: PvP-Kennzeichnung (Opt-in) und Liste.
+    usage: /pvp <on|bestätigen|off|status|list>
+    aliases: [kampf]
+  regeln:
+    description: Zeigt die PvP- und Griefing-Regeln.
+    usage: /regeln
+    aliases: [rules]
   stat:
     description: Zeigt Statistiken von dir oder einem anderen Spieler.
     usage: /stat <kills|deaths|blocks|diamonds|playtime|all> [Spieler]

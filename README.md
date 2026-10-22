@@ -35,6 +35,29 @@ Voraussetzungen: JDK 25 und Gradle 9.x. Paper dokumentiert die API-Abhängigkeit
 - **Admin-Panel:** Inventar ansehen, Daten löschen (Stats, Achievements, Inventar/Spielerdaten) für einen Spieler oder alle, mit Bestätigung; Teleport zu/holen, Einfrieren (bleibt nach Aus-/Einloggen bestehen, gespeichert in `frozen.yml`).
 - **Extras:** Todeskoordinaten im Chat, schlichte Join-/Quit-Meldungen.
 
+## PvP-Kennzeichnung (Opt-in)
+
+Standard: **geschützt**. Mit `/pvp on` (danach `/pvp bestätigen`) stimmst du PvP, Fallen und Griefing durch andere Gekennzeichnete zu.
+
+- `/pvp off` — Austritt, frühestens nach 60 Minuten (`pvp.optout-cooldown-minutes`)
+- `/pvp status`, `/pvp list` — eigener Status bzw. wer PvP will und wer nicht
+- `/regeln` — PvP- und Griefing-Regeln im Wortlaut der Discord-Regeln
+- Tablist: roter Punkt = PvP, grüner Punkt = geschützt, dazu Zähler im Header. Im Chat steht nur bei Gekennzeichneten ein roter Punkt.
+- Die Kennzeichnung ist eine Anzeige mit Zustimmung; die Regeln setzt das Team durch (Ban/Mute und Strafen-Log im Admin-Panel).
+- Erster Join: kurzer Willkommenstext zu `/regeln` und `/pvp`.
+- Admin-Panel: Kennzeichnung pro Spieler setzen oder entfernen.
+
+## Anti-Klau: Zugriffs-Log (nur Admins)
+
+Das Plugin protokolliert Behälter (Kisten, Fässer, Shulker, Öfen, Trichter ...): wer sie öffnet und **was er herausnimmt oder hineinlegt**, außerdem wer Türen, Falltüren und Zauntore benutzt und wer Behälter zerstört. Gespeichert in `activity.log`, Einträge werden nach `accesslog.retention-days` (14) gelöscht.
+
+- `/zugriffe inspect` (Aliase `/zlog`, `/log`) — Inspektor: Rechtsklick auf einen Block zeigt dessen Verlauf, der Behälter öffnet sich dabei nicht
+- `/zugriffe near [Radius]` — Einträge in deiner Nähe
+- `/zugriffe player <Name> [Anzahl]` — Einträge eines Spielers
+- Admin-Panel: Kompass-Symbol bei jedem Spieler (Ansicht mit allen Einträgen), Inspektor-Schalter in der Spielerliste
+
+Der Chat zeigt bei jedem Spieler einen Punkt: rot = PvP, grün = geschützt.
+
 ## Vorab-Zugang (vor der Eröffnung)
 
 Zusätzlich zur normalen Whitelist gibt es eine Zugangsliste. Ist der Vorab-Zugang aktiv, dürfen nur Spieler auf dieser Liste (und Operatoren) joinen, auch wenn andere bereits gewhitelisted sind.
