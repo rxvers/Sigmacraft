@@ -71,6 +71,14 @@ final class AdminPanel implements Listener {
     private final PunishmentManager punishments;
     private static final Pattern UUID_FILE = Pattern.compile("^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\\.(dat|dat_old|json)$");
     private static final Set<String> SKIP_DIRS = Set.of("region", "entities", "poi", "DIM-1", "DIM1", "datapacks", "generated", "plugins", "logs", "libraries", "cache", "versions", "crash-reports", ".paper-remap", "mods");
+    private static final String[] STAT_METRICS = {"kills", "deaths", "blocks", "diamonds", "playtime"};
+    private static final String[] STAT_KEYS = {"kills", "deaths", "blocks_mined", "diamonds_mined", "playtime_seconds"};
+    private static final String[] STAT_LABELS = {"Kills", "Tode", "Abgebaute Blöcke", "Diamanterze", "Spielzeit"};
+    private static final Material[] STAT_ICONS = {Material.IRON_SWORD, Material.SKELETON_SKULL, Material.IRON_PICKAXE, Material.DIAMOND, Material.CLOCK};
+    private static final long[] STEPS = {100, 10, 1};
+    private static final long[] PLAYTIME_STEPS = {3600, 600, 60};
+    private record StatPrompt(UUID target, String name, int metric) { }
+    private final Map<UUID, StatPrompt> statPrompts = new ConcurrentHashMap<>();
     private final Map<UUID, Prompt> prompts = new ConcurrentHashMap<>();
     private final Map<UUID, Long> loginLocks = new ConcurrentHashMap<>();
     private final Set<UUID> frozen = new HashSet<>();
@@ -280,6 +288,8 @@ final class AdminPanel implements Listener {
         boolean listed = plugin.access().isAllowed(name);
         inv.setItem(22, item(listed ? Material.WRITABLE_BOOK : Material.BOOK, listed ? "&aVorab-Zugang: erlaubt" : "&7Vorab-Zugang: nicht erlaubt",
                 "&7Klicken zum " + (listed ? "Entziehen" : "Erlauben")));
+        inv.setItem(17, item(Material.COMPARATOR, "&6Statistiken bearbeiten", "&7Kills, Tode, Blöcke, Diamanten, Spielzeit",
+                plugin.hasStats(id) ? "&7Hinzufügen, entfernen oder setzen" : "&cNoch keine Statistik vorhanden"));
         inv.setItem(23, item(Material.BOOK, "&eStrafen-Log", "&7Erhaltene Strafen: &f" + punishments.history(id).size()));
         inv.setItem(25, item(Material.TNT, "&4Daten löschen", "&7Stats, Achievements, Inventar ...", "&cMit Bestätigung"));
         inv.setItem(27, item(Material.ARROW, "&eZurück"));
@@ -380,6 +390,81 @@ final class AdminPanel implements Listener {
         admin.openInventory(inv);
     }
 
+    private String statText(int metric, long value) {
+        if (metric == 4) return (value / 3600) + " Std " + ((value % 3600) / 60) + " Min";
+        return Long.toString(value);
+    }
+
+    private void openStats(Player admin, UUID id) {
+        String name = plugin.nameOf(id);
+        PanelHolder holder = new PanelHolder("stats", id, name, false, 0);
+        Inventory inv = create(holder, 54, "&6Statistiken: &f" + name);
+        for (int row = 0; row < STAT_METRICS.length; row++) {
+            long value = plugin.statValue(id, STAT_KEYS[row]);
+            boolean time = row == 4;
+            long[] steps = time ? PLAYTIME_STEPS : STEPS;
+            String[] units = time ? new String[]{"1 Std", "10 Min", "1 Min"} : new String[]{"100", "10", "1"};
+            int base = row * 9;
+            inv.setItem(base, item(STAT_ICONS[row], "&f" + STAT_LABELS[row], "&7Aktuell: &f" + statText(row, value)));
+            for (int i = 0; i < 3; i++) {
+                inv.setItem(base + 1 + i, item(Material.RED_STAINED_GLASS_PANE, "&c-" + units[i]));
+                inv.setItem(base + 5 + i, item(Material.LIME_STAINED_GLASS_PANE, "&a+" + units[2 - i]));
+            }
+            inv.setItem(base + 4, item(Material.ANVIL, "&eWert setzen", time ? "&7Im Chat, z. B. &f90m&7, &f5h&7, &f2d" : "&7Zahl im Chat eingeben"));
+            inv.setItem(base + 8, item(Material.BARRIER, "&4Auf 0 setzen"));
+        }
+        inv.setItem(49, item(Material.ARROW, "&eZurück"));
+        admin.openInventory(inv);
+    }
+
+    private void changeStat(Player admin, UUID id, String name, int metric, long newValue) {
+        long old = plugin.statValue(id, STAT_KEYS[metric]);
+        plugin.setStat(id, STAT_KEYS[metric], newValue);
+        plugin.getLogger().info("Admin " + admin.getName() + " ändert " + STAT_LABELS[metric] + " von " + name + ": " + old + " -> " + Math.max(0L, newValue));
+    }
+
+    private void clickStats(Player admin, PanelHolder holder, int slot) {
+        UUID id = holder.target;
+        if (slot == 49) { later(() -> openPlayer(admin, id)); return; }
+        int row = slot / 9, col = slot % 9;
+        if (row < 0 || row >= STAT_METRICS.length) return;
+        long[] steps = row == 4 ? PLAYTIME_STEPS : STEPS;
+        long current = plugin.statValue(id, STAT_KEYS[row]);
+        if (col >= 1 && col <= 3) {
+            later(() -> { changeStat(admin, id, holder.name, row, current - steps[col - 1]); openStats(admin, id); });
+        } else if (col >= 5 && col <= 7) {
+            later(() -> { changeStat(admin, id, holder.name, row, current + steps[7 - col]); openStats(admin, id); });
+        } else if (col == 8) {
+            later(() -> { changeStat(admin, id, holder.name, row, 0L); openStats(admin, id); });
+        } else if (col == 4) {
+            later(() -> {
+                statPrompts.put(admin.getUniqueId(), new StatPrompt(id, holder.name, row));
+                admin.closeInventory();
+                msg(admin, PRE + "&7Gib den neuen Wert für &f" + STAT_LABELS[row] + " &7von &f" + holder.name + " &7im Chat ein"
+                        + (row == 4 ? " &8(z. B. &f90m&8, &f5h&8, &f2d&8)" : "") + "&7. &8(&fabbrechen&8 zum Abbrechen)");
+            });
+        }
+    }
+
+    private void handleStatPrompt(Player admin, String message) {
+        StatPrompt prompt = statPrompts.get(admin.getUniqueId());
+        if (prompt == null) return;
+        statPrompts.remove(admin.getUniqueId());
+        if (message.equalsIgnoreCase("abbrechen")) { msg(admin, PRE + "&7Abgebrochen."); return; }
+        long value;
+        if (prompt.metric() == 4) {
+            long ms = PunishmentManager.parseDuration(message);
+            if (ms < 0) { msg(admin, PRE + "&cUngültige Zeit. &7Beispiele: &f90m&7, &f5h&7, &f2d"); return; }
+            value = ms / 1000L;
+        } else {
+            try { value = Long.parseLong(message); } catch (NumberFormatException ex) { msg(admin, PRE + "&cUngültige Zahl."); return; }
+            if (value < 0) { msg(admin, PRE + "&cDer Wert darf nicht negativ sein."); return; }
+        }
+        changeStat(admin, prompt.target(), prompt.name(), prompt.metric(), value);
+        msg(admin, PRE + "&a" + STAT_LABELS[prompt.metric()] + " &7von &f" + prompt.name() + " &7ist jetzt &f" + statText(prompt.metric(), value) + "&7.");
+        openStats(admin, prompt.target());
+    }
+
     private void openActivity(Player admin, UUID id) {
         String name = plugin.nameOf(id);
         PanelHolder holder = new PanelHolder("alog", id, name, false, 0);
@@ -441,6 +526,7 @@ final class AdminPanel implements Listener {
             case "player" -> clickPlayer(admin, holder, slot);
             case "duration" -> clickDuration(admin, holder, slot);
             case "log" -> { if (slot == 49) later(() -> openPlayer(admin, holder.target)); }
+            case "stats" -> clickStats(admin, holder, slot);
             case "alog" -> { if (slot == 49) later(() -> openPlayer(admin, holder.target)); }
             case "inv" -> { if (slot == 53) later(() -> openPlayer(admin, holder.target)); }
             case "ender" -> { if (slot == 35) later(() -> openPlayer(admin, holder.target)); }
@@ -505,6 +591,10 @@ final class AdminPanel implements Listener {
                 }
             });
             case 13 -> later(() -> openActivity(admin, id));
+            case 17 -> later(() -> {
+                if (plugin.hasStats(id)) openStats(admin, id);
+                else msg(admin, PRE + "&cDieser Spieler hat noch keine Statistik.");
+            });
             case 15 -> later(() -> {
                 boolean on = !plugin.pvp().isMarked(id);
                 plugin.pvp().setMarked(id, on);
@@ -751,10 +841,11 @@ final class AdminPanel implements Listener {
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPromptChat(AsyncPlayerChatEvent e) {
         Player admin = e.getPlayer();
-        if (!prompts.containsKey(admin.getUniqueId())) return;
+        UUID adminId = admin.getUniqueId();
+        if (!prompts.containsKey(adminId) && !statPrompts.containsKey(adminId)) return;
         e.setCancelled(true);
         String message = e.getMessage().trim();
-        later(() -> handlePrompt(admin, message));
+        later(() -> { if (statPrompts.containsKey(adminId)) handleStatPrompt(admin, message); else handlePrompt(admin, message); });
     }
 
     private void handlePrompt(Player admin, String message) {
@@ -827,6 +918,7 @@ final class AdminPanel implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         prompts.remove(e.getPlayer().getUniqueId());
+        statPrompts.remove(e.getPlayer().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)

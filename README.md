@@ -32,7 +32,7 @@ Voraussetzungen: JDK 25 und Gradle 9.x. Paper dokumentiert die API-Abhängigkeit
 - **Spawn:** kein PvP und kein Schaden im Schutzradius (`spawn.no-pvp`, `spawn.no-damage`).
 - **Team-Koordinaten:** `/team coordssave <Name>`, `/team coords list`, `/team coords delete <Name>`.
 - **Nether/End:** per Config (`worlds.disable-nether`, `worlds.disable-end`) oder im Admin-Panel umschaltbar. Admins sind ausgenommen.
-- **Admin-Panel:** Inventar ansehen, Daten löschen (Stats, Achievements, Inventar/Spielerdaten) für einen Spieler oder alle, mit Bestätigung; Teleport zu/holen, Einfrieren (bleibt nach Aus-/Einloggen bestehen, gespeichert in `frozen.yml`).
+- **Admin-Panel:** Statistiken bearbeiten (hinzufügen, entfernen, setzen), Inventar ansehen, Daten löschen (Stats, Achievements, Inventar/Spielerdaten) für einen Spieler oder alle, mit Bestätigung; Teleport zu/holen, Einfrieren (bleibt nach Aus-/Einloggen bestehen, gespeichert in `frozen.yml`).
 - **Extras:** Todeskoordinaten im Chat, schlichte Join-/Quit-Meldungen.
 
 ## PvP-Kennzeichnung (Opt-in)
@@ -73,9 +73,9 @@ Zusätzlich zur normalen Whitelist gibt es eine Zugangsliste. Ist der Vorab-Zuga
 
 ## Creeper
 
-Creeper-Explosionen richten keinen Schaden an (`creeper.disable-explosions`).
+Creeper explodieren, zerstören aber keine Blöcke (`creeper.block-damage: false`).
 
-## Top-1-Symbole
+## Top-1-Symbole (einziges Chat-Zeichen)
 
 Wer in einer Rangliste auf Platz 1 steht (Wert > 0), bekommt im Chat und in der Tablist ein Symbol: ⚔ Kills, ☠ Tode, ◆ Diamanten, ⛏ Blöcke, ◷ Spielzeit. Die Symbole werden alle 10 Sekunden aktualisiert.
 

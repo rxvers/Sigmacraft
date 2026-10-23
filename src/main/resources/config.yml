@@ -26,7 +26,7 @@ elytra:
   boost-strength: 1.8
 
 creeper:
-  disable-explosions: true
+  block-damage: false
 
 worlds:
   disable-nether: true

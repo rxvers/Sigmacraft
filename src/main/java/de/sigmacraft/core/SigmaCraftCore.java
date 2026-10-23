@@ -353,6 +353,19 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     // ---------- Daten löschen (vom Admin-Panel genutzt) ----------
 
     /** Setzt die SigmaCraft-Statistiken zurück (für einen Spieler oder, bei null, für alle). */
+    boolean hasStats(UUID id) { return stats.contains("players." + id); }
+
+    long statValue(UUID id, String key) { return get(id, key); }
+
+    /** Setzt einen Statistikwert (nicht negativ) und aktualisiert Rangliste, Tablist und Hologramme. */
+    void setStat(UUID id, String key, long value) {
+        stats.set(base(id) + "." + key, Math.max(0L, value));
+        saveStats();
+        recomputeTop();
+        refreshAllTabs();
+        leaderboards.refreshAll();
+    }
+
     void clearOurStats(UUID only) {
         ConfigurationSection section = stats.getConfigurationSection("players");
         if (section != null) {
@@ -369,19 +382,12 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
         leaderboards.refreshAll();
     }
 
-    // ---------- Creeper-Schutz ----------
+    // ---------- Creeper: Explosion ja, Blockschaden nein ----------
 
     @EventHandler(ignoreCancelled = true)
     public void onCreeperExplode(EntityExplodeEvent event) {
-        if (event.getEntity() instanceof Creeper && getConfig().getBoolean("creeper.disable-explosions", true)) {
-            event.setCancelled(true);
-        }
-    }
-
-    @EventHandler(ignoreCancelled = true)
-    public void onCreeperDamage(EntityDamageByEntityEvent event) {
-        if (event.getDamager() instanceof Creeper && getConfig().getBoolean("creeper.disable-explosions", true)) {
-            event.setCancelled(true);
+        if (event.getEntity() instanceof Creeper && !getConfig().getBoolean("creeper.block-damage", false)) {
+            event.blockList().clear();
         }
     }
 
@@ -409,13 +415,11 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     @EventHandler(ignoreCancelled = true)
     public void onChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
-        String badges = topBadges(player.getUniqueId());
-        String icon = badges.isEmpty() ? chatIcon(player.getUniqueId()) : badges;
-        // Keep the vanilla chat format and add only small symbols, no rank titles.
+        String icon = topBadges(player.getUniqueId()); // nur die Top-1-Symbole jeder Kategorie
         String prefix = teams == null ? "" : teams.prefix(player.getUniqueId());
         boolean marked = pvpManager != null && pvpManager.isMarked(player.getUniqueId());
         String dot = (marked ? ChatColor.RED : ChatColor.GREEN) + "● " + ChatColor.RESET;
-        event.setFormat(dot + prefix + "%s " + icon + ChatColor.RESET + ": %s");
+        event.setFormat(dot + prefix + "%s" + (icon.isEmpty() ? "" : " " + icon) + ChatColor.RESET + ": %s");
     }
 
     @Override
@@ -570,15 +574,6 @@ public final class SigmaCraftCore extends JavaPlugin implements Listener, TabCom
     private boolean isDiamondOre(Block block) {
         String type = block.getType().name();
         return type.equals("DIAMOND_ORE") || type.equals("DEEPSLATE_DIAMOND_ORE");
-    }
-
-    private String chatIcon(UUID id) {
-        // Use broadly supported Unicode symbols instead of platform-dependent emoji.
-        if (get(id, "diamonds_mined") >= 100) return ChatColor.AQUA + "◆";
-        if (get(id, "kills") >= 25) return ChatColor.RED + "⚔";
-        if (get(id, "playtime_seconds") >= 36000) return ChatColor.GOLD + "◷";
-        if (get(id, "blocks_mined") >= 1000) return ChatColor.GRAY + "⛏";
-        return ChatColor.DARK_GRAY + "·";
     }
 
     public void refreshPlayerTab(Player player) { updateTab(player); }
